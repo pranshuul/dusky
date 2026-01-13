@@ -16,6 +16,7 @@ readonly DOTFILES_GIT_DIR="${HOME}/dusky"
 readonly WORK_TREE="${HOME}"
 readonly BACKUP_NAME="recovery-backup-$(date +%s)"
 readonly BRANCH="main"
+# This is the Source of Truth. We enforce this URL.
 readonly REPO_URL="https://github.com/dusklinux/dusky"
 
 # ------------------------------------------------------------------------------
@@ -143,6 +144,23 @@ if [[ "$SC_STATUS" == "true" ]]; then
     fi
 else
     log "OK" "Standard checkout detected (safe)."
+fi
+
+# Fix 3: Ensure Remote URL is correct (The Fork Fix)
+CURRENT_URL=$(dotgit remote get-url origin 2>/dev/null || echo "")
+# Remove trailing .git for comparison if needed, but simple string check is usually enough
+if [[ "$CURRENT_URL" != "$REPO_URL" ]]; then
+    warn "Remote URL mismatch detected!"
+    warn "Current: $CURRENT_URL"
+    warn "Target:  $REPO_URL"
+    log "FIX" "Updating remote 'origin' to official repository..."
+    
+    if dotgit remote set-url origin "$REPO_URL"; then
+        log "OK" "Remote updated successfully."
+    else
+        err "Failed to update remote URL."
+        exit 1
+    fi
 fi
 
 # ------------------------------------------------------------------------------
