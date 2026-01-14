@@ -4,7 +4,7 @@
 # Script: Hyprlock Theme Manager (htm)
 # Description: Enterprise-grade configuration management for Hyprlock themes.
 #              Optimized for Arch/Hyprland/UWSM ecosystems.
-# Features:    Atomic linking, XDG compliance, ANSI-safe UI, Smart Detection.
+# Features:    Source-based loading, XDG compliance, ANSI-safe UI, Smart Detection.
 # -----------------------------------------------------------------------------
 
 set -uo pipefail
@@ -20,7 +20,6 @@ fi
 readonly _CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 readonly CONFIG_ROOT="${_CONFIG_HOME}/hypr"
 readonly THEMES_ROOT="${CONFIG_ROOT}/hyprlock_themes"
-readonly BACKUP_EXT=".backup.$(date +%s)"
 
 # State variables (Integers for boolean efficiency)
 declare -i SELECTED_IDX=0
@@ -146,27 +145,54 @@ discover_themes() {
 
 # --- Detect Current Theme ---
 detect_current_theme() {
-    local symlink="${CONFIG_ROOT}/hyprlock.conf"
-    local real_target real_theme_dir candidate_resolved
+    local target="${CONFIG_ROOT}/hyprlock.conf"
+    local real_target=""
+    local real_theme_dir candidate_resolved
     local -i i
 
-    # If it's not a symlink, we can't be "on a theme"
-    [[ -L "$symlink" ]] || return 0
+    # If target doesn't exist, we default to index 0
+    [[ -e "$target" ]] || return 0
 
-    # Resolve the symlink. If broken, return 0 (default to index 0)
-    real_target=$(realpath -- "$symlink" 2>/dev/null) || return 0
+    if [[ -L "$target" ]]; then
+        # Handle legacy symlink detection
+        real_target=$(realpath -- "$target" 2>/dev/null) || return 0
+    elif [[ -f "$target" ]]; then
+        # Handle new 'source = path' detection (Pure Bash)
+        while IFS='=' read -r key value || [[ -n "$key" ]]; do
+            # Trim leading/trailing whitespace
+            key="${key#"${key%%[![:space:]]*}"}"
+            key="${key%"${key##*[![:space:]]}"}"
+            
+            if [[ "$key" == "source" ]]; then
+                # Extract path and trim
+                local path="$value"
+                path="${path#"${path%%[![:space:]]*}"}"
+                path="${path%"${path##*[![:space:]]}"}"
+                
+                # Expand tilde if present
+                if [[ "$path" == "~"* ]]; then
+                    path="${HOME}${path:1}"
+                fi
+                
+                real_target=$(realpath -- "$path" 2>/dev/null)
+                break
+            fi
+        done < "$target"
+    fi
+
+    # If we couldn't resolve a target path, return
+    [[ -n "$real_target" ]] || return 0
+    
     real_theme_dir="${real_target%/*}"
 
     for (( i = 0; i < ${#THEME_PATHS[@]}; i++ )); do
         # FAST PATH: Pure string comparison (no fork)
-        # Handles standard setups where paths match exactly
         if [[ "${THEME_PATHS[i]}" == "$real_theme_dir" ]]; then
             SELECTED_IDX=$i
             return 0
         fi
 
         # SLOW PATH: Resolve symlinks (forks 'realpath')
-        # Handles complex dotfiles setups (e.g. ~/dotfiles symlinked to ~/.config)
         candidate_resolved=$(realpath -- "${THEME_PATHS[i]}" 2>/dev/null) || continue
         if [[ "$candidate_resolved" == "$real_theme_dir" ]]; then
             SELECTED_IDX=$i
@@ -227,28 +253,10 @@ apply_theme() {
         return 1
     fi
 
-    # Backup existing real file (if it's not a symlink)
-    # This prevents accidental deletion of a handcrafted config file
-    if [[ -f "$target" && ! -L "$target" ]]; then
-        log_warn "Backing up existing non-symlink config to ${target}${BACKUP_EXT}"
-        if ! mv -- "$target" "${target}${BACKUP_EXT}"; then
-            log_err "Backup failed. Aborting."
-            return 1
-        fi
-    fi
+    local source_entry="${source/#$HOME/\~}"
 
-    # Explicitly remove the old link/file to ensure atomicity
-    # Check if file exists OR is a (possibly broken) symlink
-    if [[ -e "$target" || -L "$target" ]]; then
-        if ! rm -f -- "$target"; then
-             log_err "Failed to remove existing config: $target"
-             return 1
-        fi
-    fi
-
-    # Create new symlink
-    if ! ln -s -- "$source" "$target"; then
-        log_err "Failed to create symlink"
+    if ! printf 'source = %s\n' "$source_entry" > "$target"; then
+        log_err "Failed to write config file: $target"
         return 1
     fi
 
