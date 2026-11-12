@@ -143,7 +143,7 @@ execute() {
             ;;
         suspend)
             sleep "${ACTION_DELAY}"
-            exec systemctl suspend
+            exec systemctl hibernate
             ;;
         reboot)
             sleep "${ACTION_DELAY}"
