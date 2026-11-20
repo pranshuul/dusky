@@ -9,100 +9,158 @@ while strictly handling `hl.gesture()` function blocks via AST-bracket mapping.
 """
 
 import re
-from pathlib import Path
-from typing import Any
+lazy from pathlib import Path
+lazy from typing import Any
 from python.engines.lua import HyprlandLuaEngine
+from python.shared.lua_source import fields, replace_field, string_value, tokens
 
 # -----------------------------------------------------------------------------
 # TRANSLATION MAP: UI Friendly Labels <-> Lua Backend Code
 # -----------------------------------------------------------------------------
+def _build_continuous_lua(prefix: str, up_flag: str, down_flag: str, delta_expr: str) -> str:
+    return f"""{{
+        start = function(e)
+            _G.{prefix}_acc = ({delta_expr}) * 0.25
+            _G.{prefix}_ms  = e.time_ms or 0
+        end,
+        update = function(e)
+            local d = ({delta_expr}) * 0.25
+            local acc = (_G.{prefix}_acc or 0)
+            if (d > 0 and acc < 0) or (d < 0 and acc > 0) then
+                acc = acc * 0.25
+            end
+            acc = acc + d
+            local step = math.floor(math.abs(acc))
+            local now = e.time_ms or 0
+            local last = _G.{prefix}_ms or 0
+            if step >= 2 and (now < last or (now - last) >= 25) then
+                if step > 100 then step = 100 end
+                local flag = acc > 0 and "{up_flag} " or "{down_flag} "
+                _G.{prefix}_acc = acc - (acc > 0 and step or -step)
+                _G.{prefix}_ms  = now
+                hl.exec_cmd(dusky_scripts .. "mako_osd/osd_router/osd_router.sh " .. flag .. step)
+            else
+                _G.{prefix}_acc = acc
+            end
+        end,
+        finish = function(e)
+            local acc = (_G.{prefix}_acc or 0)
+            _G.{prefix}_acc = 0
+            if not (e and e.cancelled) then
+                local step = math.floor(math.abs(acc))
+                if step >= 1 then
+                    if step > 100 then step = 100 end
+                    local flag = acc > 0 and "{up_flag} " or "{down_flag} "
+                    hl.exec_cmd(dusky_scripts .. "mako_osd/osd_router/osd_router.sh " .. flag .. step)
+                end
+            end
+        end,
+    }}"""
+
 ACTION_MAP = {
     "Native Workspace Swipe": '"workspace"',
-    "Toggle Dusky QuickPanel": 'function()\n        hl.exec_cmd([[gdbus call --session --dest org.dusky.quickpanal --object-path /org/dusky/quickpanal --method org.freedesktop.Application.Activate ""]])\n    end',
+    "Open Dusky Tray": 'function()\n        hl.exec_cmd([["$HOME/.local/bin/dusky_tray"]])\n    end',
     "Toggle Waybar": 'function()\n        hl.exec_cmd(dusky_scripts .. "waybar/waybar_toggle.sh")\n    end',
-    "Toggle Blur & Opacity": 'function()\n        hl.exec_cmd(dusky_scripts .. "hypr_blur_opacity_shadow_toggle.sh")\n    end',
+    "Toggle Blur & Opacity": 'function()\n        hl.exec_cmd(dusky_scripts .. "hypr/hypr_blur_opacity_shadow_toggle.sh")\n    end',
     "Media: Play / Pause": 'function()\n        hl.exec_cmd(dusky_scripts .. "mako_osd/osd_router/osd_router.sh --play-pause")\n    end',
+    "Media: Volume (Continuous)": _build_continuous_lua("_dusky_vol", "--vol-up", "--vol-down", "-e.delta.y"),
+    "Screen: Brightness (Continuous)": _build_continuous_lua("_dusky_bright", "--bright-up", "--bright-down", "e.delta.x"),
     "Media: Volume Up (+10%)": 'function()\n        hl.exec_cmd(dusky_scripts .. "mako_osd/osd_router/osd_router.sh --vol-up 10")\n    end',
     "Media: Volume Down (-10%)": 'function()\n        hl.exec_cmd(dusky_scripts .. "mako_osd/osd_router/osd_router.sh --vol-down 10")\n    end',
     "Screen: Brightness Up (+10%)": 'function()\n        hl.exec_cmd(dusky_scripts .. "mako_osd/osd_router/osd_router.sh --bright-up 10")\n    end',
     "Screen: Brightness Down (-10%)": 'function()\n        hl.exec_cmd(dusky_scripts .. "mako_osd/osd_router/osd_router.sh --bright-down 10")\n    end',
+    'Native Tape Scroll': '"scroll_move"',
+    'Move Window': '"move"',
+    'Resize Window': '"resize"',
+    'Toggle Floating': '"float"',
+    'Toggle Fullscreen': '"fullscreen"',
+    'Close Window': '"close"',
+    "Toggle Magic Scratchpad": '"special"',
+    "Toggle Cursor Zoom (2x)": '"cursor_zoom"',
     "Disabled / Unbound": '__DELETE__'
 }
 
 def get_friendly_name(block_str: str) -> str:
     """Safely extracts the UI label by scanning the raw Lua block for keywords."""
-    if '"workspace"' in block_str or "'workspace'" in block_str: return "Native Workspace Swipe"
-    if "org.dusky.quickpanal" in block_str: return "Toggle Dusky QuickPanel"
+    try:
+        spans = fields(block_str, block_str.index('{'), block_str.rindex('}')+1)
+        a, b = spans['action']
+        action = block_str[a:b]
+    except (ValueError, KeyError):
+        return "Custom Lua Action"
+    native = string_value(action)
+    if native:
+        if native == "unset":
+            return "Disabled / Unbound"
+        if native == 'special' and ('workspace_name' not in spans or string_value(block_str[slice(*spans['workspace_name'])]) != 'magic'):
+            return "Custom Lua Action"
+        if native in {'float', 'fullscreen', 'cursor_zoom'} and 'mode' in spans and block_str[slice(*spans['mode'])].strip() not in {'nil', '\"\"', "''"}:
+            return "Custom Lua Action"
+        if native == 'cursor_zoom' and ('zoom_level' not in spans or block_str[slice(*spans['zoom_level'])].strip('\"\' ') not in {'2', '2.0'}):
+            return "Custom Lua Action"
+        return next((label for label, code in ACTION_MAP.items() if code == '"'+native+'"'), "Custom Lua Action")
+    block_str = ' '.join(t[1] for t in tokens(action))
+    if "dusky_tray" in block_str: return "Open Dusky Tray"
     if "waybar_toggle.sh" in block_str: return "Toggle Waybar"
     if "hypr_blur_opacity_shadow_toggle.sh" in block_str: return "Toggle Blur & Opacity"
     if "--play-pause" in block_str: return "Media: Play / Pause"
+    if "--vol-up" in block_str and "--vol-down" in block_str: return "Media: Volume (Continuous)"
+    if "--bright-up" in block_str and "--bright-down" in block_str: return "Screen: Brightness (Continuous)"
     if "--vol-up" in block_str: return "Media: Volume Up (+10%)"
     if "--vol-down" in block_str: return "Media: Volume Down (-10%)"
     if "--bright-up" in block_str: return "Screen: Brightness Up (+10%)"
     if "--bright-down" in block_str: return "Screen: Brightness Down (-10%)"
-    return "Disabled / Unbound"
+    return "Custom Lua Action"
+
+# Tokenize once so comments, escaped quotes, and Lua long strings cannot be
+# mistaken for executable gestures or table braces.
+_RE_LUA_TOKEN = re.compile(
+    r'--\[(?P<comment_eq>=*)\[.*?\](?P=comment_eq)\]|--[^\r\n]*'
+    r'|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\''
+    r'|\[(?P<string_eq>=*)\[.*?\](?P=string_eq)\]'
+    r'|(?P<gesture>\bhl\.gesture\s*\(\s*\{)'
+    r'|(?P<fingers>\bfingers\s*=\s*(?P<count>\d+))'
+    r'|(?P<direction>\bdirection\s*=\s*(?P<quote>["\'])(?P<value>[^"\']+)(?P=quote))'
+    r'|(?P<scope>\b(?:function|if|do|repeat|end|until)\b)'
+    r'|(?P<brace>[{}])',
+    re.DOTALL,
+)
+_RE_LUA_SPACE = re.compile(r'\s+|--\[(=*)\[.*?\]\1\]|--[^\r\n]*', re.DOTALL)
+
 
 def find_gesture_blocks(content: str) -> list[tuple[int, int, str, str, str]]:
-    """
-    Bulletproof structural parser. Uses deterministic bracket counting while safely 
-    ignoring braces trapped inside Lua strings (quotes and multi-line brackets).
-    """
+    """Find executable gesture tables while retaining their source offsets."""
     blocks = []
-    idx = 0
-    while True:
-        # Robustly locate the start of a gesture block regardless of spacing
-        match = re.search(r'hl\.gesture\s*\(\s*\{', content[idx:])
-        if not match: break
-        
-        start = idx + match.start()
-        brace_start = idx + match.end() - 1 # Index of the opening '{'
-        
-        brace_count = 0
-        end = -1
-        in_str_double = False
-        in_str_single = False
-        in_multi = False
-        
-        i = brace_start
-        while i < len(content):
-            char = content[i]
-            prev = content[i-1] if i > 0 else ''
-            
-            # String boundary tracking
-            if not in_multi and not in_str_single and char == '"' and prev != '\\':
-                in_str_double = not in_str_double
-            elif not in_multi and not in_str_double and char == "'" and prev != '\\':
-                in_str_single = not in_str_single
-            elif not in_str_double and not in_str_single:
-                if not in_multi and content[i:i+2] == '[[':
-                    in_multi = True
-                    i += 1
-                elif in_multi and content[i:i+2] == ']]':
-                    in_multi = False
-                    i += 1
-                    
-            # Only count braces if we are strictly outside of any string formats
-            if not (in_str_double or in_str_single or in_multi):
-                if char == '{':
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        paren_idx = content.find(")", i)
-                        end = paren_idx + 1 if paren_idx != -1 else i + 1
-                        break
-            i += 1
-                    
-        if end != -1:
-            block_str = content[start:end]
-            f_m = re.search(r'fingers\s*=\s*(\d+)', block_str)
-            d_m = re.search(r'direction\s*=\s*"([^"]+)"', block_str)
-            if f_m and d_m:
-                blocks.append((start, end, block_str, f_m.group(1), d_m.group(1)))
-            idx = end
-        else:
-            idx = start + match.end()
-            
+    tokens = iter(_RE_LUA_TOKEN.finditer(content))
+    for token in tokens:
+        if token.lastgroup != "gesture":
+            continue
+        start = token.start()
+        depth = 1
+        scope_depth = 0
+        fingers = direction = None
+        for inner in tokens:
+            if inner.lastgroup == "gesture":
+                depth += 1
+            elif inner.lastgroup == "brace":
+                depth += 1 if inner.group() == "{" else -1
+            elif inner.lastgroup == "scope":
+                scope_depth += -1 if inner.group() in ("end", "until") else 1
+            elif depth == 1 and scope_depth == 0 and inner.lastgroup == "fingers":
+                fingers = inner["count"]
+            elif depth == 1 and scope_depth == 0 and inner.lastgroup == "direction":
+                direction = inner["value"]
+            if depth == 0:
+                end = inner.end()
+                while space := _RE_LUA_SPACE.prefixmatch(content, end):
+                    end = space.end()
+                if end == len(content) or content[end] != ")":
+                    break
+                end += 1
+                block = content[start:end]
+                if fingers and direction:
+                    blocks.append((start, end, block, fingers, direction))
+                break
     return blocks
 
 # -----------------------------------------------------------------------------
@@ -115,7 +173,7 @@ class TrackpadLuaEngine(HyprlandLuaEngine):
 
         # ---------------------------------------------------------------------
         # STATE VIRTUALIZATION:
-        # Pre-fill standard Hyprland 0.55 physics variables and unbound gestures.
+        # Pre-fill standard Hyprland physics variables and unbound gestures.
         # This prevents the UI from marking them as `[Missing]` while keeping
         # the config uncluttered until the user actively edits them.
         # ---------------------------------------------------------------------
@@ -138,8 +196,8 @@ class TrackpadLuaEngine(HyprlandLuaEngine):
             if key not in state:
                 state[key] = val
 
-        for fingers in [3, 4]:
-            for direction in ["horizontal", "left", "right", "up", "down"]:
+        for fingers in [2, 3, 4]:
+            for direction in ["horizontal", "vertical", "left", "right", "up", "down", "pinch"]:
                 state[f"gesture/{fingers}/{direction}/action"] = "Disabled / Unbound"
 
         # ---------------------------------------------------------------------
@@ -150,77 +208,73 @@ class TrackpadLuaEngine(HyprlandLuaEngine):
         except OSError:
             return state
 
+        executed = {c['line'] for c in self._call_sites if c['file'] == str(self.config_path) and c['method'] == 'gesture'}
         blocks = find_gesture_blocks(content)
-        for _, _, block_str, fingers, direction in blocks:
+        for start, _, block_str, fingers, direction in blocks:
+            if content.count('\n', 0, start)+1 not in executed:
+                continue
             friendly_label = get_friendly_name(block_str)
             state[f"gesture/{fingers}/{direction}/action"] = friendly_label
 
         return state
 
     def write_batch(self, changes: list[tuple[str, str, str, str]]) -> tuple[bool, str, str]:
-        standard_changes = []
-        gesture_changes = []
-        
-        for key, scope, val, itype in changes:
-            if scope.startswith("gesture/") and key == "action":
-                gesture_changes.append((scope, val))
-            else:
-                standard_changes.append((key, scope, val, itype))
-                
-        success = True
-        msg = ""
-        debug = ""
-        
-        # 1. Process standard configuration via the AST Engine
-        if standard_changes:
-            success, msg, debug = super().write_batch(standard_changes)
-            
-        if not success:
-            return success, msg, debug
-            
-        # 2. Process gesture changes safely via block-level structural replacement
-        if gesture_changes:
-            try:
-                path = Path(self.config_path)
-                content = path.read_text(encoding="utf-8")
-                
-                for scope, new_val in gesture_changes:
-                    parts = scope.split('/')
-                    if len(parts) != 3: continue
-                    fingers = parts[1]
-                    direction = parts[2]
-                    
-                    action_code = ACTION_MAP.get(new_val, ACTION_MAP["Disabled / Unbound"])
-                    
-                    # Re-scan blocks on every iteration because index offsets shift after substitution
-                    blocks = find_gesture_blocks(content)
-                    replaced = False
-                    for start, end, _, b_fingers, b_direction in blocks:
-                        if b_fingers == fingers and b_direction == direction:
-                            # If action is set to Disabled, we cleanly snip the entire gesture out
-                            if action_code == "__DELETE__":
-                                content = content[:start] + content[end:]
-                            else:
-                                new_block = f'''hl.gesture({{\n    fingers   = {fingers},\n    direction = "{direction}",\n    action    = {action_code},\n}})'''
-                                content = content[:start] + new_block + content[end:]
-                            replaced = True
-                            break
-                            
-                    # If gesture block doesn't exist, append it cleanly to the file (unless it's an unbind op)
-                    if not replaced and action_code != "__DELETE__":
-                        new_block = f'''hl.gesture({{\n    fingers   = {fingers},\n    direction = "{direction}",\n    action    = {action_code},\n}})'''
-                        content = content.rstrip() + f"\n\n{new_block}\n"
+        standard = [c for c in changes if not c[1].startswith("gesture/")]
+        gestures = [c for c in changes if c[1].startswith("gesture/")]
+        if not gestures:
+            return super().write_batch(standard)
+        if not self.loaded_files:
+            self.load_state()
+        executed = {c['line'] for c in self._call_sites
+                    if c['file'] == str(self.config_path) and c['method'] == 'gesture'}
 
-                path.write_text(content, encoding="utf-8")
-                
-                if hasattr(self, 'file_mtimes'):
-                    self.file_mtimes[str(path)] = path.stat().st_mtime
-                elif hasattr(self, 'file_mtime'):
-                    self.file_mtime = path.stat().st_mtime
-                    
-                msg = f"Successfully batched {len(changes)} writes (Hybrid Trackpad Engine)."
-                
-            except Exception as e:
-                return False, f"Hybrid Engine failed to patch gesture block: {e}", debug
-                
-        return True, msg, debug
+        def transform(content):
+            # Find original source spans once. Never replace a dormant callback.
+            slots = {}
+            for a, b, block, f, d in find_gesture_blocks(content):
+                if content.count('\n', 0, a)+1 in executed:
+                    slots.setdefault((f, d), []).append((a, b, block))
+            edits, appended = [], []
+            unique = {(key, scope): (key, scope, value, kind) for key, scope, value, kind in gestures}
+            for key, scope, value, _ in unique.values():
+                parts = scope.split('/')
+                if key != 'action' or len(parts) != 3 or not parts[1].isdigit() or not 2 <= int(parts[1]) <= 9:
+                    raise ValueError(f'Invalid gesture binding: {scope}/{key}')
+                f, d = parts[1:]
+                if d not in {'swipe', 'horizontal', 'vertical', 'left', 'right', 'up', 'down', 'pinch', 'pinchin', 'pinchout'}:
+                    raise ValueError(f'Invalid gesture direction: {d}')
+                matches = slots.get((f, d), [])
+                if len(matches) > 1:
+                    raise ValueError(f'Multiple gestures use {f} fingers and {d}; edit their Lua definitions individually.')
+                if value == 'Custom Lua Action' and matches:
+                    continue
+                if value not in ACTION_MAP:
+                    raise ValueError(f'Unknown gesture action: {value}')
+                delta_expr = "e.delta.x" if d in {"horizontal", "left", "right"} else "-e.delta.y"
+                if value == "Media: Volume (Continuous)":
+                    raw = _build_continuous_lua("_dusky_vol", "--vol-up", "--vol-down", delta_expr)
+                elif value == "Screen: Brightness (Continuous)":
+                    raw = _build_continuous_lua("_dusky_bright", "--bright-up", "--bright-down", delta_expr)
+                else:
+                    raw = ACTION_MAP[value]
+                if value == 'Disabled / Unbound':
+                    if matches:
+                        edits.append((matches[0][0], matches[0][1], ''))
+                    continue
+                block = matches[0][2] if matches else f'hl.gesture({{fingers={f}, direction="{d}"}})'
+                block = replace_field(block, 'action', raw)
+                if value in {'Toggle Floating', 'Toggle Fullscreen', 'Toggle Cursor Zoom (2x)'}:
+                    block = replace_field(block, 'mode', 'nil')
+                if value == 'Toggle Magic Scratchpad':
+                    block = replace_field(block, 'workspace_name', '"magic"')
+                elif value == 'Toggle Cursor Zoom (2x)':
+                    block = replace_field(block, 'zoom_level', '"2"')
+                if matches:
+                    edits.append((matches[0][0], matches[0][1], block))
+                else:
+                    appended.append(block)
+            for a, b, replacement in sorted(edits, reverse=True):
+                content = content[:a]+replacement+content[b:]
+            return content + ''.join('\n'+block+'\n' for block in appended)
+
+        return self.write_transformed(standard, transform)

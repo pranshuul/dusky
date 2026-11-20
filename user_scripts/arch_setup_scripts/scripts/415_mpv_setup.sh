@@ -4,18 +4,21 @@
 set -euo pipefail
 shopt -s globstar nullglob
 
-SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
-SETUP_DIR=$(cd -- "${SCRIPT_PATH%/*}/../../mpv/setup" && pwd)
-readonly SETUP_DIR
-readonly ASSETS_DIR="$SETUP_DIR/assets"
-readonly MPV_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/mpv"
-readonly DEPENDENCIES=(mpv yt-dlp mpv-mpris)
-BACKUP_ID=$(date +%Y%m%d_%H%M%S_%N)
-readonly BACKUP_ID
-
 log_info() { printf '[INFO] %s\n' "$1"; }
 log_warn() { printf '[WARN] %s\n' "$1" >&2; }
 die() { printf '[ERROR] %s\n' "$1" >&2; exit 1; }
+
+SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
+SETUP_DIR=$(cd -- "${SCRIPT_PATH%/*}/../../mpv/setup" && pwd)
+readonly SETUP_DIR
+if (( EUID == 0 )) && [[ -n "${SUDO_USER:-}" && -z "${XDG_CONFIG_HOME:-}" ]]; then
+    die 'Run this script as your regular user (it will invoke sudo only if packages are missing).'
+fi
+readonly ASSETS_DIR="$SETUP_DIR/assets"
+readonly MPV_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/mpv"
+readonly DEPENDENCIES=(mpv yt-dlp mpv-mpris ffmpeg vapoursynth vapoursynth-plugin-mvtools)
+BACKUP_ID=$(date +%Y%m%d_%H%M%S_%N)
+readonly BACKUP_ID
 
 TEMP_FILE=''
 cleanup() {
@@ -50,6 +53,9 @@ install_file() {
         backup="$MPV_CONFIG_DIR/setup-backups/$BACKUP_ID/$relative"
         mkdir -p -- "${backup%/*}"
         cp -a -- "$target" "$backup"
+        if [[ -d "$target" && ! -L "$target" ]]; then
+            rm -rf -- "$target"
+        fi
         log_warn "Backed up $relative to setup-backups/$BACKUP_ID/$relative"
     fi
 
@@ -61,10 +67,30 @@ install_file() {
 log_info 'Starting Dusky Player setup.'
 
 # Detect an incomplete ISO bundle before changing the installed configuration.
-for relative in scripts/dusky_player/main.lua scripts/dusky_player/lib/icons.lua scripts/dusky_thumbnails.lua; do
+for relative in \
+    scripts/dusky_player/main.lua \
+    scripts/dusky_player/lib/ass.lua scripts/dusky_player/lib/buttons.lua \
+    scripts/dusky_player/lib/cursor.lua scripts/dusky_player/lib/fzy.lua \
+    scripts/dusky_player/lib/icons.lua scripts/dusky_player/lib/menus.lua \
+    scripts/dusky_player/lib/std.lua scripts/dusky_player/lib/text.lua \
+    scripts/dusky_player/lib/theme.lua scripts/dusky_player/lib/utils.lua \
+    scripts/dusky_player/lib/waveform.lua \
+    scripts/dusky_player/elements/BufferingIndicator.lua scripts/dusky_player/elements/Button.lua \
+    scripts/dusky_player/elements/Controls.lua scripts/dusky_player/elements/Curtain.lua \
+    scripts/dusky_player/elements/CycleButton.lua scripts/dusky_player/elements/Element.lua \
+    scripts/dusky_player/elements/Elements.lua scripts/dusky_player/elements/ManagedButton.lua \
+    scripts/dusky_player/elements/Menu.lua scripts/dusky_player/elements/PauseIndicator.lua \
+    scripts/dusky_player/elements/Speed.lua scripts/dusky_player/elements/Timeline.lua \
+    scripts/dusky_player/elements/TopBar.lua scripts/dusky_player/elements/Volume.lua \
+    scripts/dusky_player/elements/WindowBorder.lua \
+    scripts/dusky_thumbnails.lua scripts/dusky_silence.lua scripts/hwdec_topology.lua \
+    scripts/shader_presets.lua scripts/autoskip.lua scripts/motion_tier.lua \
+    vapoursynth/motion_interpolate.vpy \
+    shaders/FSRCNNX_x2_8-0-4-1.glsl \
+    shaders/ravu-zoom-ar-r3.hook shaders/SSimDownscaler.glsl; do
     [[ -s "$ASSETS_DIR/$relative" ]] || die "Missing bundled asset: $relative"
 done
-for relative in mpv.conf input.conf script-opts/dusky_player.conf; do
+for relative in mpv.conf input.conf script-opts/dusky_player.conf script-opts/dusky_silence.conf; do
     [[ -s "$SETUP_DIR/config/$relative" ]] || die "Missing configuration: $relative"
 done
 
@@ -89,33 +115,15 @@ for source in "$ASSETS_DIR"/**; do
     install_file "$source" "${source#"$ASSETS_DIR"/}"
 done
 
-# Preserve thumbnail settings when migrating the previous worker.
-if [[ -f "$MPV_CONFIG_DIR/script-opts/thumbfast.conf" &&
-    ! -e "$MPV_CONFIG_DIR/script-opts/dusky_thumbnails.conf" &&
-    ! -L "$MPV_CONFIG_DIR/script-opts/dusky_thumbnails.conf" ]]; then
-    install_file "$MPV_CONFIG_DIR/script-opts/thumbfast.conf" script-opts/dusky_thumbnails.conf
-fi
-
-# Retire the previous UI and fonts to avoid loading two controllers. Preserve
-# everything in a dated backup, including user modifications to the old scripts.
-for relative in scripts/uosc scripts/uosc.lua scripts/uosc_shared scripts/thumbfast.lua scripts/thumbfast_repo \
-    fonts/uosc_icons.otf fonts/uosc_textures.ttf script-opts/uosc.conf script-opts/thumbfast.conf; do
-    target="$MPV_CONFIG_DIR/$relative"
-    if [[ -e "$target" || -L "$target" ]]; then
-        backup="$MPV_CONFIG_DIR/setup-backups/$BACKUP_ID/$relative"
-        mkdir -p -- "${backup%/*}"
-        mv -T -- "$target" "$backup"
-        log_info "Retired $relative to setup-backups/$BACKUP_ID/$relative"
-    fi
-done
-
 install_file "$SETUP_DIR/config/mpv.conf" mpv.conf
 install_file "$SETUP_DIR/config/input.conf" input.conf
-# Preserve existing Dusky Player customization.
-if [[ ! -e "$MPV_CONFIG_DIR/script-opts/dusky_player.conf" && ! -L "$MPV_CONFIG_DIR/script-opts/dusky_player.conf" ]]; then
-    install_file "$SETUP_DIR/config/script-opts/dusky_player.conf" script-opts/dusky_player.conf
-else
-    log_info 'Preserved existing script-opts/dusky_player.conf.'
-fi
+# Preserve existing player and silence-trimming customization.
+for relative in script-opts/dusky_player.conf script-opts/dusky_silence.conf; do
+    if [[ ! -e "$MPV_CONFIG_DIR/$relative" && ! -L "$MPV_CONFIG_DIR/$relative" ]]; then
+        install_file "$SETUP_DIR/config/$relative" "$relative"
+    else
+        log_info "Preserved existing $relative."
+    fi
+done
 
 log_info "Dusky Player setup complete: $MPV_CONFIG_DIR"

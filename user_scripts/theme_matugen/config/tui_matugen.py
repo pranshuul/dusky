@@ -26,7 +26,7 @@ from python.engines.matugen import MatugenEngine
 ENGINE_TYPE = "matugen"
 TARGET_FILE = "~/.config/matugen/config.toml"
 APP_TITLE = "Dusky Matugen TUI"
-THEME_FILE = "~/.config/matugen/generated/dusky_tui.json"
+THEME_FILE = "~/.config/matugen/generated/dusky.json"
 
 # =============================================================================
 # 2. UI & ENVIRONMENT BEHAVIOR
@@ -215,7 +215,7 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             key="dusky_cursor",
             scope="DEFAULT",
             type_="bool",
-            default=True,
+            default=False,
             group="Compositor",
             extended_help="**Dusky Cursor (Accent-Themed Bibata)**\n\nRecolors Bibata-Modern-Classic bitmaps with the Matugen accent (fill) + mode-aware outline into the `Dusky` XCursor theme and applies it live (`hyprctl setcursor`, gsettings, D-Bus env, Hyprland Lua env, GTK settings). Rebuilds automatically on every theme switch; disable to keep your current cursor untouched."
         ),
@@ -265,31 +265,13 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             extended_help="**Theme Change Notification**\n\nSends desktop notification upon theme update completion."
         ),
         ConfigItem(
-            label="Dusky Control Center",
-            key="dusky_control_center",
-            scope="DEFAULT",
-            type_="bool",
-            default=False,
-            group="Dusky Services",
-            extended_help="**Dusky Control Center Service**\n\nTriggers `dusky.service` systemd restart on theme changes."
-        ),
-        ConfigItem(
-            label="Dusky QuickPanal",
-            key="dusky_quickpanal",
-            scope="DEFAULT",
-            type_="bool",
-            default=False,
-            group="Dusky Services",
-            extended_help="**Dusky QuickPanel Service**\n\nTriggers `dusky_quickpanal.service` systemd restart on theme changes."
-        ),
-        ConfigItem(
-            label="Dusky TUI Theme",
-            key="dusky_tui",
+            label="Dusky Palette",
+            key="dusky",
             scope="DEFAULT",
             type_="bool",
             default=True,
             group="Dusky Services",
-            extended_help="**Dusky TUI Color Scheme**\n\nGenerates `dusky_tui.json` for all Dusky TUI interactive apps."
+            extended_help="**Dusky Palette Generation**\n\nGenerates `dusky.json` for all Dusky applications (Rust UI & Dusky TUI)."
         ),
         ConfigItem(
             label="Dusky Visualizer",
@@ -551,9 +533,9 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             key="papirus-folders",
             scope="DEFAULT",
             type_="bool",
-            default=True,
+            default=False,
             group="Icons",
-            extended_help="**Papirus Folders (Lab Best-of-Breed)**\n\nNative matugen Lab-distance mapping of `colors.primary` to closest Papirus palette (adwaita, black, blue, bluegrey, breeze, brown, carmine, cyan, darkcyan, deeporange, green, grey, indigo, magenta, nordic, orange, palebrown, paleorange, pink, red, teal, violet, white, yaru, yellow) via `colors_to_compare` + `closest_color`.\n\nRuns `sudo -n papirus-folders -C {{closest_color}} --theme Papirus-Dark -u` (requires `aur/papirus-folders` + NOPASSWD drop-in at `/etc/sudoers.d/papirus-folders`) + live `gsettings` toggle `Adwaita → Papirus-Dark` so Dolphin/Nautilus reload instantly. See `~/.config/matugen/templates/papirus-color:1` and `~/.config/matugen/config.toml:48`."
+            extended_help="**Papirus Folders (Lab Best-of-Breed)**\n\nNative matugen Lab-distance mapping of `colors.primary` to closest Papirus palette (adwaita, black, blue, bluegrey, breeze, brown, carmine, cyan, darkcyan, deeporange, green, grey, indigo, magenta, nordic, orange, palebrown, paleorange, pink, red, teal, violet, white, yaru, yellow) via `colors_to_compare` + `closest_color`.\n\nRuns `papirus_folders.sh` asynchronously in the background to update folder colors without blocking Matugen. Disable to leave Papirus folder icons untouched."
         ),
         ConfigItem(
             label="Standalone Commands",
@@ -605,9 +587,8 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             confirm_message="Apply Standard Workstation profile? This will enable the curated Dusky desktop suite and disable optional extras.",
             preset_payload={
                 "alacritty": False, "beeper": False, "btop": True, "cava": True,
-                "dusky_control_center": False, "dusky_quickpanal": False,
-                "dusky_cursor": True,
-                "dusky_sites": True, "dusky_tui": True, "dusky_visualizer_colors": True,
+                "dusky_cursor": False,
+                "dusky_sites": True, "dusky": True, "dusky_visualizer_colors": True,
                 "fastfetch": True, "foot": True, "gtk3": True, "gtk4": True,
                 "gtksourceview": True, "hyprland": True, "hyprlock": True,
                 "icon_theme": True, "kate_syntax": True,
@@ -615,14 +596,14 @@ SCHEMA: dict[int, list[ConfigItem]] = {
                 "konsole_profile": True, "kvantum_kvconfig": False, "kvantum_svg": False,
                 "gimp": False,
                 "mako": True, "master_dump": False, "neovim": True, "obs": False,
-                "obsidian": False, "opencode": False, "papirus-folders": True,
+                "obsidian": False, "opencode": False, "papirus-folders": False,
                 "pywalfox": True, "qt5ct": True, "qt6ct": True, "rofi": True,
                 "spicetify": False, "standalone_commands": True, "starship": False,
                 "steam": False, "theme_notify": True, "tmux": False, "vesktop": False,
                 "vscode": False, "waybar": True, "wlogout": True, "yazi": True,
                 "zathura": False, "zed": False, "zellij": False
             },
-            extended_help="**Standard Workstation**\n\nCurated Dusky suite: GTK 3/4, Icons, Qt5/6, KDE (kdeglobals + kate_syntax + konsole), Hyprland stack (hyprland, hyprlock, waybar, wlogout, rofi, mako), theme_notify, dusky_tui/visualizer, kitty/foot, neovim/yazi, cava/btop/fastfetch, pywalfox/dusky_sites/papirus-folders, standalone_commands. All known keys listed explicitly so strict-snapshot semantics are predictable."
+            extended_help="**Standard Workstation**\n\nCurated Dusky suite: GTK 3/4, Icons, Qt5/6, KDE (kdeglobals + kate_syntax + konsole), Hyprland stack (hyprland, hyprlock, waybar, wlogout, rofi, mako), theme_notify, dusky_tui/visualizer, kitty/foot, neovim/yazi, cava/btop/fastfetch, pywalfox/dusky_sites, standalone_commands. Heavy rebuilders (dusky_cursor, papirus-folders) default to off for instant theme switching."
         ),
         ConfigItem(
             label="Minimal — Core Only",
@@ -634,9 +615,8 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             confirm_message="Apply Minimal profile? Only Hyprland, Waybar, Kitty/Foot, Rofi and Mako will remain enabled.",
             preset_payload={
                 "alacritty": False, "beeper": False, "btop": False, "cava": False,
-                "dusky_control_center": False, "dusky_quickpanal": False,
                 "dusky_cursor": False,
-                "dusky_sites": False, "dusky_tui": True, "dusky_visualizer_colors": False,
+                "dusky_sites": False, "dusky": True, "dusky_visualizer_colors": False,
                 "fastfetch": False, "foot": True, "gtk3": False, "gtk4": False,
                 "gtksourceview": False, "hyprland": True, "hyprlock": False,
                 "icon_theme": False, "kate_syntax": False,
@@ -663,9 +643,8 @@ SCHEMA: dict[int, list[ConfigItem]] = {
             confirm_message="Enable **all** templates? This will uncomment every `[templates.*]` block.",
             preset_payload={
                 "alacritty": True, "beeper": True, "btop": True, "cava": True,
-                "dusky_control_center": True, "dusky_quickpanal": True,
                 "dusky_cursor": True,
-                "dusky_sites": True, "dusky_tui": True, "dusky_visualizer_colors": True,
+                "dusky_sites": True, "dusky": True, "dusky_visualizer_colors": True,
                 "fastfetch": True, "foot": True, "gtk3": True, "gtk4": True,
                 "gtksourceview": True, "hyprland": True, "hyprlock": True,
                 "icon_theme": True, "kate_syntax": True,

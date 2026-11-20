@@ -42,3 +42,23 @@ also set an explicit generic target for compilers they invoke. Bump `pkgver` or
 Keep generated binaries and package archives out of Git. A package installed
 from the ISO remains installed after the offline repository is removed, but
 later binary updates require a new package source or another update mechanism.
+
+`dusky_network` uses the network meter's shared `setup.py --generic` builder:
+frozen/offline Cargo, RAM-aware tmpfs/disk selection, and baseline x86-64 flags. The
+package includes its exact binary/source manifest and disables makepkg stripping
+because the builder already strips the executable. User setup step 154 reuses a
+matching package without a compiler, or builds natively after source edits.
+
+The five GUI recipes (`dusky_center`, `dusky_overview`, `dusky_papers`, `dusky_snap`,
+`dusky_tray`) along with `dusky_network` call the shared `build_rust.py` adapter and
+`147_rust_compiles_shared_NOT_STANDALONE.py` storage policy directly. The factory
+passes the canonical adapter path to `makepkg` as `DUSKY_BUILD_RUST`; the adapter
+locates the helper relative to its own path. The factory fingerprints both shared
+files, plus the overview font inputs, so shared changes invalidate affected
+packages. Recipe directories and `TEMPLATE` need no helper symlinks or copies.
+
+Compiler artifacts prefer executable tmpfs with sufficient available memory;
+otherwise they use temporary disk storage. Job counts follow the memory budget.
+RAM resource exhaustion retries once on disk with one job. Only the final binary
+is staged for `package()`; compiler artifacts are removed before packaging.
+The shared Cargo dependency cache is retained for reuse and offline builds.

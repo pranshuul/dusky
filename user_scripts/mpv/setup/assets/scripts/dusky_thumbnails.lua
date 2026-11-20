@@ -55,6 +55,7 @@ local file
 local spawned = false
 local disabled = false
 local spawn_waiting = false
+local worker_id = 0
 local script_written = false
 
 local dirty = false
@@ -67,8 +68,6 @@ local last_seek_time
 local effective_w, effective_h = options.max_width, options.max_height
 local real_w, real_h
 local last_real_w, last_real_h
-
-local script_name
 
 local show_thumbnail = false
 
@@ -235,6 +234,7 @@ local function remove_thumbnail_files()
         file = nil
     end
     os.remove(options.thumbnail)
+    os.remove(options.thumbnail..".tmp")
     os.remove(options.thumbnail..".bgra")
 end
 
@@ -264,21 +264,29 @@ local function spawn(time)
     local vid = properties["vid"]
     has_vid = vid or 0
 
+    local vaapi_dev = mp.get_property("vaapi-device")
+    local worker_hwdec = "no"
+    if options.hwdec then
+        worker_hwdec = (vaapi_dev and vaapi_dev ~= "") and "vaapi" or "auto-safe"
+    end
+
     local args = {
         mpv_path, "--no-config", "--msg-level=all=no", "--idle", "--pause", "--keep-open=always", "--really-quiet", "--no-terminal",
-        "--load-scripts=no", "--osc=no", "--ytdl=no", "--load-stats-overlay=no", "--load-console=no", "--load-commands=no", "--load-auto-profiles=no",
+        "--load-scripts=no", "--osc=no", "--ytdl=no", "--load-stats-overlay=no", "--load-console=no", "--load-auto-profiles=no",
+        "--load-select=no", "--load-context-menu=no", "--input-builtin-drag-and-drop=no", "--media-controls=no", "--sws-allow-zimg=no",
+        "--sub-auto=no", "--audio-file-auto=no", "--cover-art-auto=no", "--curl-enabled="..(options.network and "yes" or "no"),
         "--edition="..(properties["edition"] or "auto"), "--vid="..(vid or "auto"), "--no-sub", "--no-audio",
         "--start="..time, allow_fast_seek and "--hr-seek=no" or "--hr-seek=yes",
         "--ytdl-format=worst", "--demuxer-readahead-secs=0", "--demuxer-max-bytes=128KiB",
-        "--vd-lavc-skiploopfilter=all", "--hwdec-software-fallback=1", "--vd-lavc-fast", "--vd-lavc-threads=2", "--hwdec="..(options.hwdec and "auto" or "no"),
+        "--vd-lavc-skiploopfilter=all", "--hwdec-software-fallback=1", "--vd-lavc-fast", "--vd-lavc-threads=2", "--hwdec="..worker_hwdec,
         "--vf="..vf_string(filters_all, true),
         "--sws-scaler=fast-bilinear",
         "--video-rotate="..last_rotate,
         "--ovc=rawvideo", "--of=image2", "--ofopts=update=1", "--o="..options.thumbnail
     }
-
-    table.insert(args, "--sws-allow-zimg=no")
-    table.insert(args, "--media-controls=no")
+    if vaapi_dev and vaapi_dev ~= "" then
+        table.insert(args, "--vaapi-device="..vaapi_dev)
+    end
 
     if not script_written then
         local client_script_path = options.socket..".run"
@@ -303,16 +311,19 @@ local function spawn(time)
 
     spawned = true
     spawn_waiting = true
+    worker_id = worker_id + 1
+    local current_worker = worker_id
 
     subprocess(args, true,
         function(success, result)
-            if spawn_waiting and (success == false or (result.status ~= 0 and result.status ~= -2)) then
+            if current_worker ~= worker_id then return end
+            if spawn_waiting and (success == false or not result or (result.status ~= 0 and result.status ~= -2 and not result.killed_by_us)) then
                 spawned = false
                 spawn_waiting = false
                 options.tone_mapping = "no"
                 mp.msg.error("mpv subprocess create failed")
                 mp.commandv("show-text", "Dusky Player: thumbnail worker could not start", 5000)
-            elseif success == true and (result.status == 0 or result.status == -2) then
+            elseif success == true and result and (result.status == 0 or result.status == -2 or result.killed_by_us) then
                 spawn_waiting = false
             end
         end
@@ -330,14 +341,21 @@ local function run(command)
     end
 end
 
-local function draw(w, h, script)
+local last_req
+
+local function update_preview_coords()
+    if not last_req then return end
+    local px = last_req.x + ((last_req.w and real_w) and math.floor((last_req.w - real_w * options.scale_factor) / 2 + 0.5) or 0)
+    local py = last_req.y + ((last_req.h and real_h) and math.floor((last_req.h - real_h * options.scale_factor) / 2 + 0.5) or 0)
+    x, y = math.floor(px + 0.5), math.floor(py + 0.5)
+end
+
+local function draw(w, h)
     if not w or not show_thumbnail then return end
+    update_preview_coords()
     if x ~= nil then
         local scale_w, scale_h = options.scale_factor ~= 1 and (w * options.scale_factor) or nil, options.scale_factor ~= 1 and (h * options.scale_factor) or nil
         mp.command_native_async({"overlay-add", options.overlay_id, x, y, options.thumbnail..".bgra", 0, "bgra", w, h, (4*w), scale_w, scale_h}, function() end)
-    elseif script then
-        local json, err = mp.utils.format_json({width=w, height=h, scale_factor=options.scale_factor, x=x, y=y, socket=options.socket, thumbnail=options.thumbnail, overlay_id=options.overlay_id})
-        mp.commandv("script-message-to", script, "dusky-thumbnails-render", json)
     end
 end
 
@@ -389,8 +407,8 @@ seek_timer = mp.add_periodic_timer(seek_period, function()
         seek_period_counter = 1
     else
         if seek_period_counter == 2 then
+            seek_timer:kill()
             if allow_fast_seek then
-                seek_timer:kill()
                 seek()
             end
         else seek_period_counter = seek_period_counter + 1 end
@@ -433,12 +451,13 @@ local function check_new_thumb()
         return true
     end
 
+    os.remove(tmp)
     return false
 end
 
 file_timer = mp.add_periodic_timer(file_check_period, function()
     if check_new_thumb() then
-        draw(real_w, real_h, script_name)
+        draw(real_w, real_h)
     end
 end)
 file_timer:kill()
@@ -456,7 +475,6 @@ local function clear()
     show_thumbnail = false
     last_x = nil
     last_y = nil
-    if script_name then return end
     mp.command_native_async({"overlay-remove", options.overlay_id}, function() end)
 end
 
@@ -466,6 +484,8 @@ local function quit()
         activity_timer:resume()
         return
     end
+    worker_id = worker_id + 1
+    spawn_waiting = false
     run("quit")
     spawned = false
     real_w, real_h = nil, nil
@@ -475,23 +495,16 @@ end
 activity_timer = mp.add_timeout(options.quit_after_inactivity, quit)
 activity_timer:kill()
 
-local function thumb(time, r_x, r_y, script)
+local function thumb(time, r_x, r_y)
     if disabled then return end
 
-    time = tonumber(time)
-    if time == nil then return end
+    if time == nil or r_x == nil or r_y == nil then return end
+    x, y = math.floor(r_x + 0.5), math.floor(r_y + 0.5)
 
-    if r_x == "" or r_y == "" then
-        x, y = nil, nil
-    else
-        x, y = math.floor(r_x + 0.5), math.floor(r_y + 0.5)
-    end
-
-    script_name = script
     if last_x ~= x or last_y ~= y or not show_thumbnail then
         show_thumbnail = true
         last_x, last_y = x, y
-        draw(real_w, real_h, script)
+        draw(real_w, real_h)
     end
 
     if options.quit_after_inactivity > 0 then
@@ -606,6 +619,8 @@ local function sync_changes(prop, val)
 end
 
 local function file_load()
+    worker_id = worker_id + 1
+    spawn_waiting = false
     clear()
     spawned = false
     real_w, real_h = nil, nil
@@ -632,6 +647,23 @@ local function on_duration(prop, val)
     allow_fast_seek = (val or 30) >= 30
 end
 
+local osc_preview_active = false
+local function on_draw_preview(_, req)
+    local sec = type(req) == "table" and tonumber(req["hover-sec"])
+    local rx = type(req) == "table" and tonumber(req.x)
+    local ry = type(req) == "table" and tonumber(req.y)
+    if sec and rx and ry then
+        osc_preview_active = true
+        last_req = {x = rx, y = ry, w = tonumber(req.w), h = tonumber(req.h)}
+        update_preview_coords()
+        thumb(sec, x, y)
+    elseif osc_preview_active then
+        osc_preview_active = false
+        last_req = nil
+        clear()
+    end
+end
+
 mp.observe_property("current-tracks/video", "native", update_property)
 mp.observe_property("display-hidpi-scale", "native", update_property_dirty)
 mp.observe_property("video-out-params", "native", update_property_dirty)
@@ -647,9 +679,7 @@ mp.observe_property("path", "native", update_property)
 mp.observe_property("vid", "native", sync_changes)
 mp.observe_property("edition", "native", sync_changes)
 mp.observe_property("duration", "native", on_duration)
-
-mp.register_script_message("thumb", thumb)
-mp.register_script_message("clear", clear)
+mp.observe_property("user-data/osc/draw-preview", "native", on_draw_preview)
 
 mp.register_event("file-loaded", file_load)
 mp.register_event("shutdown", shutdown)

@@ -422,6 +422,38 @@ class AuditTests(unittest.TestCase):
             unit=root/'usr/lib/systemd/system/multi-user.target.wants/linux-dusky-battery-tuning.service'
             self.assertTrue(unit.is_symlink());self.assertTrue(unit.exists())
 
+    def test_headers_package_installs_generated_rust_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            tree = Path(td)
+            path = tree / 'scripts/package/PKGBUILD'
+            path.parent.mkdir(parents=True)
+            path.write_text('_package() { :; }\n_package-headers() { :; }\nfor _p in "${pkgname[@]}"; do\n eval "package_$_p() {\n $(declare -f _package)\n _package\n }"\ndone\n')
+            p = profile(); p.set('compiler', 'rust', True)
+            d = derived(p, f=facts(dkms_modules=('nvidia',)), tree=tree)
+            d.kernelrelease = '7.4-dusky-battery'
+            with contextlib.redirect_stdout(io.StringIO()):
+                k.stage_runtime_package(tree, p, d)
+            text = path.read_text()
+            self.assertIn('generated_*.rs', text)
+            self.assertIn('_dusky_upstream_headers', text)
+            start = text.index('# Dusky runtime package integration')
+            end = text.index('# End Dusky runtime package integration')
+            wrapper = tree / 'wrapper.sh'
+            wrapper.write_text(text[start:end])
+            proc = subprocess.run(['bash', '-n', str(wrapper)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            # Functional: generated Rust files must land in $builddir, which the
+            # wrapper must define itself (the upstream function's is local to it).
+            (tree / 'rust/kernel').mkdir(parents=True, exist_ok=True)
+            (tree / 'rust/kernel/generated_test.rs').write_text('// test\n')
+            pkgdir = tree / 'pkg'
+            pkgdir.mkdir()
+            script = tree / 'run.sh'
+            script.write_text('_dusky_upstream_headers() { :; }\ndepends=()\n' + wrapper.read_text() + '\n_package-headers\n')
+            env = os.environ | {'pkgdir': str(pkgdir), 'KERNELRELEASE': '7.4-dusky-battery', 'pkgbase': 'linux-dusky-battery'}
+            subprocess.run(['bash', str(script)], cwd=tree, env=env, check=True, capture_output=True)
+            self.assertTrue((pkgdir / 'usr/lib/modules/7.4-dusky-battery/build/rust/kernel/generated_test.rs').is_file())
+
     def test_runtime_opt_out_keeps_metadata_but_no_service(self):
         p=profile();p.set('runtime','enabled',False)
         with tempfile.TemporaryDirectory() as td:
@@ -543,6 +575,56 @@ class AuditTests(unittest.TestCase):
             with patch.object(k.kernel_storage, 'ram_capacity', return_value=(ready, 'measured')), patch('builtins.input', side_effect=AssertionError('no prompt')):
                 self.assertEqual(k.choose_ram_build(args), ready)
 
+    def test_ram_choice_prompts_and_aborts_on_high_ram_fallback(self):
+        args = k.build_parser().parse_args([])
+        gib = 1 << 30
+        res = k.kernel_storage.RamCapacity(False, 'low available memory', phys_ram_sufficient=True,
+                                           total_ram=64 * gib, needed=22 * gib, budget=12 * gib,
+                                           available=20 * gib, reserve=8 * gib)
+        with patch.object(k.kernel_storage, 'ram_capacity', return_value=res):
+            with patch('builtins.input', return_value='n'), patch.object(k, 'interactive', return_value=True):
+                with self.assertRaises(k.AbortError):
+                    k.choose_ram_build(args)
+
+    def test_show_ram_fallback_warning_renders_rich_panel(self):
+        gib = 1 << 30
+        res = k.kernel_storage.RamCapacity(False, 'low memory', phys_ram_sufficient=True,
+                                           total_ram=64 * gib, needed=30 * gib, budget=12 * gib,
+                                           available=20 * gib, reserve=8 * gib)
+        with patch.object(k, 'say') as mock_say:
+            k.show_ram_fallback_warning(res, lto='thin')
+            self.assertTrue(mock_say.called)
+            # Ensure lines were emitted
+            captured = "".join(call[0][0] for call in mock_say.call_args_list)
+            self.assertIn("RAM Build Fallback", captured)
+            self.assertIn("64.0 GiB", captured)
+
+    def test_ram_choice_proceeds_on_ssd_when_confirmed_or_no_prompt(self):
+        args = k.build_parser().parse_args([])
+        gib = 1 << 30
+        res = k.kernel_storage.RamCapacity(False, 'low available memory', phys_ram_sufficient=True,
+                                           total_ram=64 * gib, needed=22 * gib, budget=12 * gib)
+        with patch.object(k.kernel_storage, 'ram_capacity', return_value=res):
+            with patch('builtins.input', return_value='y'), patch.object(k, 'interactive', return_value=True):
+                self.assertFalse(k.choose_ram_build(args))
+            no_prompt_args = k.build_parser().parse_args(['--no-prompt'])
+            with patch('builtins.input', side_effect=AssertionError('no prompt')):
+                self.assertFalse(k.choose_ram_build(no_prompt_args))
+
+    def test_ram_choice_retries_on_return_and_succeeds_when_memory_freed(self):
+        args = k.build_parser().parse_args([])
+        gib = 1 << 30
+        res_fail = k.kernel_storage.RamCapacity(False, 'low memory', phys_ram_sufficient=True,
+                                                total_ram=64 * gib, needed=22 * gib, budget=12 * gib,
+                                                available=20 * gib, reserve=8 * gib)
+        res_ok = k.kernel_storage.RamCapacity(True, 'Using RAM workspace /mnt/zram1', phys_ram_sufficient=True,
+                                              total_ram=64 * gib, needed=22 * gib, budget=25 * gib,
+                                              available=35 * gib, reserve=8 * gib)
+        with patch.object(k.kernel_storage, 'ram_capacity', side_effect=[res_fail, res_ok]):
+            # User hits Return (empty string -> default 'r')
+            with patch('builtins.input', side_effect=['']), patch.object(k, 'interactive', return_value=True):
+                self.assertTrue(k.choose_ram_build(args))
+
     def test_checkpoint_runs_after_abort(self):
         k._ABORT.set()
         try:
@@ -616,6 +698,28 @@ class AuditTests(unittest.TestCase):
             self.assertNotIn('DRM_XE', [o.symbol for o in mx.ops])
             (tree / '.config').write_text('# CONFIG_DRM_I915 is not set\n')
             with self.assertRaises(k.ProfileError): k._ops_gpu(k.Matrix(idx), p, d)
+
+    def test_nvidia_dkms_never_adds_rc_nouveau_fallback(self):
+        idx = k.KconfigIndex(frozenset({'DRM_NOUVEAU', 'PREEMPT_LAZY'}), 4)
+        for version in ('7.3', '7.3-rc7', '7.4-rc1'):
+            for vendors in (('nvidia',), ('intel', 'nvidia'), ('amd', 'nvidia')):
+                for dkms in ((), ('nvidia',), ('nvidia-open-dkms',)):
+                    with self.subTest(version=version, vendors=vendors, dkms=dkms), patch.object(k, '_gpu_hide_active', return_value=False):
+                        p = profile(); d = derived(p, facts(gpus=vendors, dkms_modules=dkms), idx)
+                        d.version = version
+                        # No .config exists here: Intel census validation has a separate test.
+                        with tempfile.TemporaryDirectory() as td:
+                            d.tree = Path(td)
+                            mx = k.Matrix(idx); k._ops_gpu(mx, p, d)
+                        ops = {o.symbol:o.action for o in mx.ops}
+                        self.assertEqual(ops['DRM_NOUVEAU'], 'n' if dkms else 'm')
+
+    def test_portable_kernel_keeps_nouveau_independent_of_builder_dkms(self):
+        p = profile(); p.set('meta', 'portable_package', True)
+        d = derived(p, facts(gpus=('nvidia',), dkms_modules=('nvidia',)))
+        d.version = '7.3-rc7'
+        mx = k.Matrix(d.idx); k._ops_gpu(mx, p, d)
+        self.assertEqual({o.symbol:o.action for o in mx.ops}['DRM_NOUVEAU'], 'm')
 
     def test_network_only_enables_selected_algorithms(self):
         p = profile(); idx = k.KconfigIndex(frozenset({'PREEMPT_LAZY', 'TCP_CONG_BBR', 'TCP_CONG_CUBIC', 'NET_SCH_CAKE', 'NET_SCH_FQ', 'NET_SCH_FQ_CODEL'}), 4)
@@ -748,6 +852,44 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(ops['TRANSPARENT_HUGEPAGE_NEVER'], 'y')
         self.assertEqual(ops['ZRAM_BACKEND_LZ4'], 'n')
         self.assertEqual(ops['ZRAM_BACKEND_ZSTD'], 'y')
+
+    def test_core_matrix_includes_binder_and_veth_for_containers(self):
+        p = profile()
+        ops_dict = {o.symbol: o for o in k.build_config_matrix(p, derived(p)).ops}
+        self.assertEqual(ops_dict['ANDROID_BINDER_IPC'].action, 'y')
+        self.assertEqual(ops_dict['ANDROID_BINDERFS'].action, 'y')
+        self.assertEqual(ops_dict['ANDROID_BINDER_DEVICES'].value, 'binder,hwbinder,vndbinder')
+        self.assertEqual(ops_dict['VETH'].action, 'm')
+        self.assertEqual(ops_dict['BRIDGE'].action, 'm')
+        self.assertEqual(ops_dict['IP_NF_MANGLE'].action, 'm')
+        self.assertEqual(ops_dict['NETFILTER_XT_TARGET_CHECKSUM'].action, 'm')
+        self.assertEqual(ops_dict['MEMFD_CREATE'].action, 'y')
+
+    def test_binder_driver_follows_kernel_generation(self):
+        p = profile()
+        # Linux 7.3: C binder present -> prefer it and disable the Rust variant.
+        idx_c = k.KconfigIndex(frozenset({'ANDROID_BINDER_IPC', 'ANDROID_BINDERFS', 'ANDROID_BINDER_IPC_RUST',
+                                          'ANDROID_BINDER_DEVICES', 'SCHED_CACHE', 'PREEMPT_LAZY'}), 4)
+        ops = {o.symbol: o for o in k.build_config_matrix(p, derived(p, idx=idx_c)).ops}
+        self.assertEqual(ops['ANDROID_BINDER_IPC'].action, 'y')
+        self.assertEqual(ops['ANDROID_BINDERFS'].action, 'y')
+        self.assertEqual(ops['ANDROID_BINDER_IPC_RUST'].action, 'n')
+        # Linux 7.4: C binder and binderfs gone -> Rust binder when Rust is on.
+        idx_rust = k.KconfigIndex(frozenset({'ANDROID_BINDER_IPC_RUST', 'ANDROID_BINDER_DEVICES',
+                                             'SCHED_CACHE', 'PREEMPT_LAZY'}), 4)
+        p_rust = profile(); p_rust.set('compiler', 'rust', True)
+        d_rust = k.derive(p_rust, facts(), idx_rust, Path('.'), 'eevdf', True, '')
+        ops = {o.symbol: o for o in k.build_config_matrix(p_rust, d_rust).ops}
+        self.assertEqual(ops['ANDROID_BINDER_IPC_RUST'].action, 'y')
+        self.assertNotIn('ANDROID_BINDERFS', ops)
+        self.assertEqual(ops['ANDROID_BINDER_DEVICES'].value, 'binder,hwbinder,vndbinder')
+        # Rust binder with Rust disabled -> no binder, with a warning.
+        d_no_rust = k.derive(p_rust, facts(), idx_rust, Path('.'), 'eevdf', False, '')
+        with patch.object(k, 'warn') as warn:
+            ops = {o.symbol: o for o in k.build_config_matrix(p_rust, d_no_rust).ops}
+        self.assertNotIn('ANDROID_BINDER_IPC_RUST', ops)
+        self.assertNotIn('ANDROID_BINDER_DEVICES', ops)
+        self.assertTrue(any('Rust binder' in str(call) for call in warn.call_args_list))
 
     def test_single_numa_node_does_not_compile_numa(self):
         p = profile(); p.set('memory', 'numa', True)

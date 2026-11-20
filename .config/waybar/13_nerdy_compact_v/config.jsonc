@@ -3,7 +3,7 @@
         "layer": "top",
         "position": "left",
         "spacing": 0,
-        "width": 10,
+        "width": 0,
         "margin-top": 0,
         "margin-bottom": 0,
         "margin-left": 0,
@@ -16,16 +16,16 @@
             "group/media",
             "group/hardware"
         ],
-        
+
         "modules-center": [
             "hyprland/workspaces"
         ],
-        
+
         "modules-right": [
             "group/updates-drawer",
             "custom/notification",
             "custom/theme",
-            "group/connections",
+            "custom/network",
             "clock",
             "tray",
             "custom/inhibit-suspend",
@@ -45,7 +45,7 @@
             "modules": [
                 "cpu",
                 "memory",
-                "temperature"
+                "custom/temperature"
             ]
         },
 
@@ -63,18 +63,10 @@
             ]
         },
 
-        "group/connections": {
-            "orientation": "inherit",
-            "modules": [
-                "custom/network",
-                "bluetooth"
-            ]
-        },
-
         "hyprland/workspaces": {
             "on-click": "activate",
             "all-outputs": true,
-            "sort-by": "number",
+            "sort-by": "default",
             "format": "{id}",
             "persistent-workspaces": {
                  "*": 5
@@ -96,11 +88,11 @@
                 "critical": 20
             },
             "tooltip-format": "{timeTo}\nHealth 󱟦 {health}%\nPower Draw {power:.2f} W",
-            "on-click": "dusky-run kitty --class power_saver.sh --hold -e \"$HOME/user_scripts/battery/power_saver.sh\" --interactive",
+            "on-click": "dusky-run kitty --class power_saver.sh --hold -e \"$HOME/user_scripts/battery/power_saver/power_saver.py\" --interactive",
             "on-click-right": "dusky-run kitty --class dusky_tui -e python3 $HOME/user_scripts/hypridle/tui_dusky_hypridle.py"
         },
 
-        "pulseaudio":{
+        "pulseaudio": {
             "justify": "center",
             "align": 0.5,
             "format": "{icon}\n{volume}",
@@ -109,25 +101,28 @@
             "on-click-middle": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
             "on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
             "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%",
-            "format-icons": ["󰖁", "", ""],
+            "format-icons": [
+                "󰖁",
+                "",
+                ""
+            ],
             "tooltip": true,
-            "tooltip-format": "{desc}\n\nLMB: pavucontrol\nRMB: cava\nMMB: Mute"
+            "tooltip-format": "{desc}\n\nLMB: pavucontrol\nRMB: cava\nMMB: Mute",
+            "on-click-right": "dusky-run kitty --class cava -e cava"
         },
 
         "backlight": {
             "justify": "center",
             "align": 0.5,
-            "device": "intel_backlight",
             "format": "{icon}\n{percent}",
             "format-icons": ["","","","","","","","","","","","","","",""],
             "tooltip": true,
             "tooltip-format": "LMB: Brightness Slider\nRMB: hyprsunset Slider\nMMB: Shaders",
-            "on-click": "dusky-run \"$HOME/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py\"",
-            "on-click-right": "dusky-run \"$HOME/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py\"",
+            "on-click": "\"$HOME/.local/bin/dusky_tray\"",
+            "on-click-right": "\"$HOME/.local/bin/dusky_tray\"",
             "on-click-middle": "dusky-run \"$HOME/user_scripts/rofi/shader_menu.sh\"",
             "on-scroll-up": "brightnessctl set +5%",
             "on-scroll-down": "brightnessctl set 5%-",
-            "min-length": 4,
             "interval": 60
         },
 
@@ -155,26 +150,15 @@
             "tooltip-format":"Used {used} GiB\nAvail {avail} Gib\nSwap {swapUsed} GiB"
         },
 
-        "temperature": {
+        "custom/temperature": {
             "justify": "center",
             "align": 0.5,
-            "thermal-zone": 6, 
-            "critical-threshold": 65,
-            "format-critical": "🔥\n{temperatureC}",
-            "format": "\n{temperatureC}",
-            "interval": 2,
-            "tooltip-format": "Package: {temperatureC}°C"
-        },
-
-        "bluetooth": {
-            "justify": "center",
-            "align": 0.5,
-            "format": "",
-            "format-disabled": "󰂲",
-            "format-connected": "",
-            "tooltip-format": "Devices connected: {num_connections}",
-            "on-click": "dusky-run blueman-manager",
-            "on-click-right": "dusky-run kitty --class bluetui -e bluetui"
+            "exec": "\"$HOME/user_scripts/waybar/temperature.sh\" 2 65",
+            "return-type": "json",
+            "format": "{icon}\n{text}",
+            "format-icons": { "default": "", "critical": "🔥" },
+            "hide-empty-text": true,
+            "restart-interval": 5
         },
 
         "clock": {
@@ -190,7 +174,6 @@
                 "mode-mon-col": 3,
                 "weeks-pos": "right",
                 "on-scroll": 1,
-                "on-click-right": "mode",
                 "format": {
                     "months": "<span color='#ffead3'><b>{}</b></span>",
                     "days": "<span color='#ecc6d9'><b>{}</b></span>",
@@ -212,20 +195,19 @@
             "align": 0.5,
             "return-type": "json",
             "tooltip": true,
-            "tooltip-format": "LMB: Dusky Network\nRMB: WiFi ON\nMMB: WiFi OFF",
+            "tooltip-format": "{tooltip}\n\nLMB: Dusky Network\nRMB: WiFi ON\nMMB: WiFi OFF",
             "on-click": "foot --app-id=dusky_tui python $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/network_manager/tui_dusky_network.py",
-            "on-click-right": "systemctl --user restart network_meter.service && nmcli radio wifi on && notify-send 'Turned ON WiFi'",
+            "on-click-right": "systemctl --user restart dusky_network.service && nmcli radio wifi on && notify-send 'Turned ON WiFi'",
             "on-click-middle": "nmcli radio wifi off && notify-send 'Turned OFF WiFi'",
-            "interval": 2, 
-            "exec": "$HOME/user_scripts/waybar/network/network_meter_calling.sh --vertical"
+            "restart-interval": 3,
+            "exec": "$HOME/.local/bin/dusky_network watch --vertical"
         },
 
         "custom/updates-trigger": {
             "justify": "center",
             "align": 0.5,
             "format": "",
-            "exec": "echo ''",
-            "exec-if": "grep -q '\"class\":\"pending\"' ~/.config/dusky/settings/waybar_update_counter_v 2>/dev/null",
+            "exec": "grep -qE '\"class\"[[:space:]]*:[[:space:]]*\"(pending|unknown)\"' \"$HOME/.config/dusky/settings/waybar_update_counter_v\" 2>/dev/null && printf '\\n'",
             "interval": 5,
             "tooltip": false
         },
@@ -243,10 +225,10 @@
         "custom/notification": {
             "justify": "center",
             "align": 0.5,
-            "tooltip-format": "Left Click: Launch Mako\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
+            "tooltip-format": "{tooltip}\n\nLeft Click: Launch Mako\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
             "format": "{}",
             "return-type": "json",
-            "exec-if": "which makoctl",
+            "exec-if": "command -v makoctl >/dev/null 2>&1",
             "exec": "~/user_scripts/waybar/mako.sh --vertical",
             "interval": 2,
             "on-click": "~/user_scripts/rofi/rofi_mako.sh",
@@ -273,10 +255,10 @@
             "align": 0.5,
             "format": "",
             "tooltip": true,
-            "tooltip-format": "Switch wallpapers\nLMB: Dark Mode\nRMB: Light Mode\nMMB: Wallpaper Selector",
+            "tooltip-format": "Wallpaper and Appearance\nLMB: Dark Mode\nRMB: Light Mode\nMMB: Dusky Papers",
             "on-click": "dusky-run \"$HOME/user_scripts/theme_matugen/theme_ctl.sh\" set --mode dark",
             "on-click-right": "dusky-run \"$HOME/user_scripts/theme_matugen/theme_ctl.sh\" set --mode light",
-            "on-click-middle": "dusky-run ~/user_scripts/images/wallpaper_selector.py"
+            "on-click-middle": "\"$HOME/.local/bin/dusky_papers\""
         },
 
 
@@ -291,11 +273,11 @@
         },
 
 
-        
+
         "tray": {
             "icon-size": 18,
             "show-passive-items": true,
-            "spacing": 1, 
+            "spacing": 1,
             "rotate": 90
         }
     }

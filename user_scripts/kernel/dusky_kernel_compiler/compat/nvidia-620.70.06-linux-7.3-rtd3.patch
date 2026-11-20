@@ -1,0 +1,21 @@
+--- a/kernel-open/nvidia/nv-pci.c
++++ b/kernel-open/nvidia/nv-pci.c
+@@ -46,2 +46,3 @@
+ #include <linux/kthread.h>
++#include <linux/fs_struct.h>
+ 
+@@ -479,7 +480,13 @@
+                    NV_PCI_SLOT_NUMBER(pci_dev));
+     if (ret > 0 && ret < sizeof(filename))
+     {
+-        struct file *file = filp_open(filename, O_RDONLY, 0);
++        struct file *file;
++
++        /* Linux 7.3 kthreads start in nullfs; resolve sysfs against init. */
++        scoped_with_init_fs()
++        {
++            file = filp_open(filename, O_RDONLY, 0);
++        }
+         if (!IS_ERR(file))
+         {
+ #if defined(NV_SEQ_READ_ITER_PRESENT)

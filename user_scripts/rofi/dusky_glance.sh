@@ -88,8 +88,13 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     printf "  \e[32m--world-clock [tz] [lbl]\e[0m   Show live world clock\n"
     printf "  \e[32m--cpu-power\e[0m                Show live CPU Package Power (Watts)\n"
     printf "  \e[32m--cpu\e[0m                      Show live CPU usage\n"
+    printf "  \e[32m--cpu-freq\e[0m                 Show live CPU core frequency\n"
     printf "  \e[32m--ram\e[0m                      Show live RAM usage\n"
+    printf "  \e[32m--ram-available\e[0m            Show live available RAM (headroom)\n"
+    printf "  \e[32m--ram-free\e[0m                 Show live free RAM (unallocated)\n"
+    printf "  \e[32m--ram-dirty\e[0m                Show live RAM dirty writeback cache\n"
     printf "  \e[32m--temp\e[0m                     Show CPU temperature\n"
+    printf "  \e[32m--load\e[0m                     Show live system load average\n"
     printf "  \e[32m--battery\e[0m                  Show battery status/power\n"
     printf "  \e[32m--disk\e[0m                     Show root disk usage\n"
     printf "  \e[32m--network\e[0m                  Show live network speed (up & down)\n"
@@ -275,7 +280,7 @@ PROMPT_STYLE='window { width: 340px; x-offset: -20px; y-offset: 20px; padding: 2
 # This maps Row 1 Col 1 to Index 0, and Row 1 Col 2 to Index 6.
 declare -a MENU_OPTIONS=(
     "󰜺  Stop / Clear"      # Index 0 (Col 1 Row 1)
-    "󰸉  Edit"              # Index 1 (Col 1 Row 2)
+    "󰸉  TUI"              # Index 1 (Col 1 Row 2)
     "  CPU"               # Index 2 (Col 1 Row 3)
     "󰢮  GPU"               # Index 3 (Col 1 Row 4)
     "󰋊  Disk Usage"        # Index 4 (Col 1 Row 5)
@@ -760,6 +765,7 @@ while true; do
                             tr_opts=(
                                 "󱑎  Stopwatch"
                                 "󰔚  System Uptime"
+                                "󰾆  System Load"
                                 "  Back"
                             )
                             trchoice=$(printf '%s\n' "${tr_opts[@]}" | "${ROFI_SUB[@]}" -p "Trackers") || break
@@ -774,6 +780,11 @@ while true; do
                                 *"System Uptime"*)
                                     save_recent "System Uptime" "--uptime"
                                     "$DAEMON_SCRIPT" --uptime & disown
+                                    exit 0
+                                    ;;
+                                *"System Load"*)
+                                    save_recent "System Load" "--load"
+                                    "$DAEMON_SCRIPT" --load & disown
                                     exit 0
                                     ;;
                             esac
@@ -887,6 +898,7 @@ while true; do
                 cpu_opts=(
                     "󱐋  CPU Power (Watts)"
                     "  CPU Usage"
+                    "󱐋  CPU Frequency"
                     "  CPU Temp"
                     "  Back"
                 )
@@ -896,6 +908,10 @@ while true; do
                 if [[ "$cpuchoice" == *"CPU Power"* ]]; then
                     save_recent "CPU Power (Watts)" "--cpu-power"
                     "$DAEMON_SCRIPT" --cpu-power & disown
+                    exit 0
+                elif [[ "$cpuchoice" == *"CPU Frequency"* ]]; then
+                    save_recent "CPU Freq" "--cpu-freq"
+                    "$DAEMON_SCRIPT" --cpu-freq & disown
                     exit 0
                 elif [[ "$cpuchoice" == *"CPU Usage"* ]]; then
                     save_recent "CPU Usage" "--cpu"
@@ -912,13 +928,33 @@ while true; do
 
         '󰘚  Memory (RAM)')
             while true; do
-                m_opts=("󰘚  System RAM Usage" "󰘚  RAM Temperature" "󰘚  ZRAM Usage" "  Back")
+                m_opts=(
+                    "󰘚  System RAM Usage"
+                    "󰘚  RAM Available (Headroom)"
+                    "󰘚  RAM Free (Unallocated)"
+                    "󰘚  RAM Dirty Cache"
+                    "󰘚  RAM Temperature"
+                    "󰘚  ZRAM Usage"
+                    "  Back"
+                )
                 mchoice=$(printf '%s\n' "${m_opts[@]}" | "${ROFI_SUB[@]}" -p "Memory") || break
                 [[ "$mchoice" == "  Back" ]] && break
 
                 if [[ "$mchoice" == *"System RAM"* ]]; then
                     save_recent "RAM Usage" "--ram"
                     "$DAEMON_SCRIPT" --ram & disown
+                    exit 0
+                elif [[ "$mchoice" == *"Available"* ]]; then
+                    save_recent "RAM Available" "--ram-available"
+                    "$DAEMON_SCRIPT" --ram-available & disown
+                    exit 0
+                elif [[ "$mchoice" == *"Free"* ]]; then
+                    save_recent "RAM Free" "--ram-free"
+                    "$DAEMON_SCRIPT" --ram-free & disown
+                    exit 0
+                elif [[ "$mchoice" == *"Dirty"* ]]; then
+                    save_recent "RAM Dirty" "--ram-dirty"
+                    "$DAEMON_SCRIPT" --ram-dirty & disown
                     exit 0
                 elif [[ "$mchoice" == *"Temperature"* ]]; then
                     save_recent "RAM Temp" "--ram-temp"
@@ -1084,7 +1120,7 @@ while true; do
             exit 0
             ;;
 
-        '󰸉  Edit')
+        '󰸉  TUI')
             foot --app-id=dusky_tui python ~/user_scripts/dusky_tui/python/main/main.py ~/user_scripts/mako_osd/dusky_glance/tui_glance_mako.py & disown
             exit 0
             ;;

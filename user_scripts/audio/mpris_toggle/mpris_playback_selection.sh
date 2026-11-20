@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Bash 5.3+; Wayland Rofi, pactl, jq, notify-send.
-# Optional: playerctl + busctl for MPRIS, or executable CLI controllers.
+# Bash 5.3+; Wayland Rofi, pactl, jq.
+# Optional: busctl for MPRIS, or executable CLI controllers.
 # List media sessions and additional streams with measured audio activity.
 set -euo pipefail
 
-readonly APP_NAME=mpris_playback NOTIFY_ICON=multimedia-audio-player-symbolic
+readonly APP_NAME=mpris_playback
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly SCRIPT_DIR CONTROLLERS_DIR="$SCRIPT_DIR/controllers"
+readonly MEDIA_IPC="$SCRIPT_DIR/../../mako_osd/osd_router/media_ipc.py"
 readonly ROFI_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/rofi/config.rasi"
 readonly ROFI_THEME='window {width: 40%;} listview {lines: 10;}'
-# Metadata protocol: title, artist, position, duration, status separated by US.
+readonly RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$UID}
+# Metadata protocol: title, artist, position, duration, status separated by US;
+# MPRIS records append capabilities and track ID.
 # US is not IFS whitespace, so empty fields survive read. Display data is one line.
 readonly SEP=$'\x1f'
 readonly ICON_PLAYING='󰐊' ICON_PAUSED='󰏤' ICON_STOPPED='󰓛' ICON_UNKNOWN='󰝚'
@@ -18,16 +21,13 @@ readonly ICON_TOGGLE='󰐎' ICON_NEXT='󰒭' ICON_PREV='󰒮' ICON_BACK='󰁍' I
 HAS_MPRIS=0
 declare -a ids=() apps=() media=() corked=() muted=() pids=() binaries=() backends=() entries=() audible=()
 declare -a players=()
-declare -A player_pids=() metadata_cache=() used_backends=() pid_counts=() app_counts=()
+declare -A player_pids=() player_owners=() metadata_cache=() used_backends=() pid_counts=() app_counts=()
 # Shared output variables avoid spawning subshells for string formatting.
 REPLY='' title='' artist='' position='' duration='' status=''
+can_control='' can_play='' can_pause='' can_next='' can_prev='' track_id=''
 
-_notify() {
-    local body=${2:-}
-    # Notification bodies support markup; metadata should display literally.
-    body=${body//&/\&amp;}; body=${body//</\&lt;}; body=${body//>/\&gt;}
-    notify-send -a "$APP_NAME" -i "$NOTIFY_ICON" \
-        -h string:x-canonical-private-synchronous:mpris_ctl -- "$1" "$body" || true
+_report() {
+    printf '%s: %s\n' "$1" "${2:-}" >&2
 }
 
 _single_line() {
@@ -36,7 +36,7 @@ _single_line() {
 
 _clean_media_name() {
     REPLY=$1
-    if [[ $REPLY == *'&'* && $REPLY == *'='* ]]; then
+    if [[ $REPLY == *'://'* && $REPLY == *'?'* ]]; then
         if [[ $REPLY == *' - '* ]]; then
             REPLY=${REPLY##* - }
             case $REPLY in mpv|vlc|firefox) REPLY='' ;; esac
@@ -80,9 +80,9 @@ _rofi_menu() {
                 return 0
             fi
             ;;
-        1) return 1 ;; # Cancelled, or accepted without a matching row.
+        1|1[0-9]|2[0-8]) return 1 ;; # Cancelled or an unused custom keybinding.
     esac
-    _notify 'Execution Failed' 'Rofi did not return a valid selection.'
+    _report 'Execution Failed' 'Rofi did not return a valid selection.'
     return 2
 }
 
@@ -111,15 +111,22 @@ _discover_sources() {
 }
 
 _update_players() {
-    players=(); player_pids=()
-    ((HAS_MPRIS)) || return 0
-    local listing name pid rest
-    listing=$(busctl --user --no-pager --no-legend --full --acquired list) || return 0
-    while read -r name pid rest; do
-        [[ $name == org.mpris.MediaPlayer2.* ]] || continue
+    players=(); player_pids=(); player_owners=()
+    local listing='[]' ipc name pid owner
+    if ((HAS_MPRIS)); then
+        listing=$(busctl --user --json=short --acquired list) || listing='[]'
+    fi
+    ipc=$(python3 "$MEDIA_IPC" list) || ipc='[]'
+    listing=$(jq -r --argjson ipc "$ipc" '
+        ([.[] | select(.name | startswith("org.mpris.MediaPlayer2."))
+            | . as $p | select(any($ipc[]; .pid == $p.pid) | not)] + $ipc)[]
+        | [.name, (.pid // ""), .connection] | join("\u001f")' <<< "$listing") || return 0
+    while IFS=$SEP read -r name pid owner; do
+        [[ -n $name && ( $owner == :* || $owner == mpv:* ) ]] || continue
         name=${name#org.mpris.MediaPlayer2.}
         players+=("$name")
         player_pids[$name]=$pid
+        player_owners[$name]=$owner
     done <<< "$listing"
 }
 
@@ -130,16 +137,50 @@ _backend_metadata() {
     else
         case $backend in
             mpris:*)
-                local format="{{default(title,\"\")}}${SEP}{{default(artist,\"\")}}${SEP}{{duration(position)}}${SEP}{{duration(mpris:length)}}${SEP}{{status}}"
-                data=$(playerctl --player="${backend#mpris:}" metadata --format "$format" 2>/dev/null) || data=''
+                # GetAll provides typed metadata without delimiter collisions.
+                # Keep the discovered connection: a restarted app must not
+                # inherit a menu selection made for its previous instance.
+                if [[ ${player_owners[${backend#mpris:}]:-} == mpv:* ]]; then
+                    data=$(python3 "$MEDIA_IPC" read "${player_owners[${backend#mpris:}]}" 2>/dev/null) || data=''
+                else
+                    data=$(busctl --user --json=short --timeout=1 --auto-start=no call \
+                        "${player_owners[${backend#mpris:}]:-}" /org/mpris/MediaPlayer2 \
+                        org.freedesktop.DBus.Properties GetAll s org.mpris.MediaPlayer2.Player \
+                        2>/dev/null) || data=''
+                fi
+                if [[ -n $data ]]; then
+                    data=$(jq -er '
+                        def text: tostring | gsub("[\u0000-\u001f\u007f]"; " ");
+                        def pad: tostring | if length < 2 then "0" + . else . end;
+                        def time:
+                            if . == null then "" else
+                                (. / 1000000 | floor | if . < 0 then 0 else . end) as $s
+                                | ($s % 60 | pad) as $sec
+                                | if $s < 3600 then "\($s / 60 | floor):\($sec)"
+                                  else "\($s / 3600 | floor):\($s / 60 | floor | . % 60 | pad):\($sec)"
+                                  end
+                            end;
+                        .data[0] as $p | ($p.Metadata.data // {}) as $m
+                        | select($p.PlaybackStatus.data | IN("Playing", "Paused", "Stopped"))
+                        | [($m["xesam:title"].data // ""),
+                           ($m["xesam:artist"].data // [] | join(", ")),
+                           ($p.Position.data | time), ($m["mpris:length"].data | time),
+                           $p.PlaybackStatus.data,
+                           $p.CanControl.data, $p.CanPlay.data, $p.CanPause.data,
+                           $p.CanGoNext.data, $p.CanGoPrevious.data,
+                           ($m["mpris:trackid"].data // "")]
+                        | map(text) | join("\u001f")' <<< "$data" 2>/dev/null) || data=''
+                fi
                 ;;
-            cli:*) data=$("$CONTROLLERS_DIR/${backend#cli:}" now 2>/dev/null) || data='' ;;
+            # An optional remote MPD connection must not stall source discovery.
+            cli:*) data=$(timeout --kill-after=1 2 "$CONTROLLERS_DIR/${backend#cli:}" now 2>/dev/null) || data='' ;;
         esac
         data=${data//[$'\r\n']/ }
         metadata_cache[$backend]=$data
     fi
     title=''; artist=''; position=''; duration=''; status=''
-    IFS=$SEP read -r title artist position duration status <<< "$data"
+    can_control=''; can_play=''; can_pause=''; can_next=''; can_prev=''; track_id=''
+    IFS=$SEP read -r title artist position duration status can_control can_play can_pause can_next can_prev track_id <<< "$data"
 }
 
 _matches_stream() {
@@ -194,10 +235,10 @@ _read_metadata() {
     _backend_metadata "${backends[i]}"
     _clean_media_name "${media[i]}"
     if [[ ${backends[i]} == pactl ]]; then
-        case $REPLY in ''|'Audio Stream'|AudioStream|webm) title='Audio Stream' ;; esac
+        case $REPLY in ''|'(null)'|'Audio Stream'|AudioStream|webm) title='Audio Stream' ;; esac
     fi
     if [[ ${2:-stream} == stream || -z $title ]]; then
-        case $REPLY in ''|'Audio Stream'|AudioStream|webm) ;; *) title=$REPLY ;; esac
+        case $REPLY in ''|'(null)'|'Audio Stream'|AudioStream|webm) ;; *) title=$REPLY ;; esac
     fi
     # /proc cmdline is NUL-separated; preserve spaces and wildcard characters.
     if [[ -z $title && ${pids[i]} =~ ^[0-9]+$ ]]; then
@@ -244,7 +285,7 @@ _build_entry() {
 _load_sources() {
     local raw id app track cork mute pid binary activity i
     if ! raw=$(_discover_sources); then
-        _notify 'Discovery Failed' 'Could not query the audio server.'
+        _report 'Discovery Failed' 'Could not query the audio server.'
         return 1
     fi
     ids=(); apps=(); media=(); corked=(); muted=(); pids=(); binaries=(); backends=(); entries=(); audible=()
@@ -264,16 +305,54 @@ _load_sources() {
     for i in "${!ids[@]}"; do
         _detect_backend "$i"; backends+=("$REPLY")
     done
-    # A paused player may have closed its audio stream. Its media session is
-    # still resumable, and its own title is authoritative even if no tab matches.
-    local player backend app binary
+    # Loaded MPRIS and CLI sessions remain resumable without an audio stream.
+    # Prefer a single interface when both describe the same player.
+    local player backend app binary controller represented session_title session_artist session_status
+    local -a sessions=()
     for player in "${players[@]}"; do
-        backend=mpris:$player
+        sessions+=("mpris:$player")
+    done
+    for controller in "$CONTROLLERS_DIR"/*; do
+        [[ -f $controller && -x $controller ]] || continue
+        sessions+=("cli:${controller##*/}")
+    done
+    for backend in "${sessions[@]}"; do
         [[ ! ${used_backends[$backend]+present} ]] || continue
+        case $backend in
+            mpris:*)
+                player=${backend#mpris:}; binary=${player%%.*}; pid=${player_pids[$player]}
+                represented=0
+                if [[ $pid =~ ^[0-9]+$ && ${used_backends[cli:${binary,,}]+present} ]]; then
+                    for i in "${!ids[@]}"; do
+                        if [[ ${backends[i]} == "cli:${binary,,}" && ${pids[i]} == "$pid" ]]; then
+                            represented=1; break
+                        fi
+                    done
+                fi
+                ((represented == 0)) || continue
+                ;;
+            cli:*)
+                binary=${backend#cli:}; pid=''
+                ;;
+        esac
         _backend_metadata "$backend"
-        [[ -n $title || -n $artist ]] || continue
+        [[ -n $title || -n $artist || ( $backend == mpris:* && -n $track_id &&
+            $track_id != /org/mpris/MediaPlayer2/TrackList/NoTrack ) ]] || continue
         case ${status,,} in playing|paused|stopped) ;; *) continue ;; esac
-        binary=${player%%.*}; app=$binary; pid=${player_pids[$player]}
+        if [[ $backend == cli:* ]]; then
+            # Without a stream PID, compare loaded media rather than app names alone.
+            session_title=$title; session_artist=$artist; session_status=$status; represented=0
+            for player in "${players[@]}"; do
+                [[ ${player%%.*} == "$binary" && ${used_backends[mpris:$player]+present} ]] || continue
+                _backend_metadata "mpris:$player"
+                if [[ $title == "$session_title" && $artist == "$session_artist" && $status == "$session_status" ]]; then
+                    represented=1; break
+                fi
+            done
+            ((represented == 0)) || continue
+            _backend_metadata "$backend"
+        fi
+        app=$binary
         for i in "${!ids[@]}"; do
             if [[ -n ${pids[i]} && ${pids[i]} == "$pid" ]] ||
                 [[ ${binaries[i],,} == "${binary,,}" ]]; then
@@ -298,19 +377,14 @@ _load_sources() {
             fi
         else
             _backend_metadata "${backends[i]}"
-            if [[ -z $title && -z $artist ]]; then
-                unset 'ids[i]' 'apps[i]' 'media[i]' 'corked[i]' 'muted[i]' \
-                    'pids[i]' 'binaries[i]' 'backends[i]' 'audible[i]'
-                continue
-            fi
-            media[i]=$title
+            [[ -z $title ]] || media[i]=$title
         fi
         _build_entry "$i"; entries[i]=$REPLY
         app=${apps[i]}
         app_counts[$app]=$(( ${app_counts[$app]:-0} + 1 ))
     done
     if ((${#ids[@]} == 0)); then
-        _notify 'No Audio Sources' 'No active audio streams or loaded media sessions were found.'
+        _report 'No Audio Sources' 'No active audio streams or loaded media sessions were found.'
     fi
 }
 
@@ -318,26 +392,102 @@ _control_source() {
     local action=$1 backend=$2
     case $backend in
         mpris:*)
-            case $action in toggle) action=play-pause ;; prev) action=previous ;; esac
-            playerctl --player="${backend#mpris:}" "$action"
+            [[ $can_control == true ]] || return 1
+            case $action in
+                toggle)
+                    if [[ $status == Playing ]]; then
+                        [[ $can_pause == true ]] || return 1
+                        action=Pause
+                    else
+                        [[ $can_play == true ]] || return 1
+                        action=Play
+                    fi ;;
+                next) [[ $can_next == true ]] || return 1; action=Next ;;
+                prev) [[ $can_prev == true ]] || return 1; action=Previous ;;
+                stop) action=Stop ;;
+                *) return 1 ;;
+            esac
+            if [[ ${player_owners[${backend#mpris:}]:-} == mpv:* ]]; then
+                python3 "$MEDIA_IPC" control "${player_owners[${backend#mpris:}]}" "$action" >/dev/null
+            else
+                busctl --user --quiet --timeout=1 --auto-start=no call \
+                    "${player_owners[${backend#mpris:}]:-}" /org/mpris/MediaPlayer2 \
+                    org.mpris.MediaPlayer2.Player "$action"
+            fi
             ;;
-        cli:*) "$CONTROLLERS_DIR/${backend#cli:}" "$action" ;;
+        cli:*) timeout --kill-after=1 2 "$CONTROLLERS_DIR/${backend#cli:}" "$action" ;;
         *) return 1 ;;
     esac
 }
 
 _perform_action() {
-    local action=$1 i=$2
-    if ! _control_source "$action" "${backends[i]}"; then
-        _notify 'Playback Control Failed' "${apps[i]}: $action failed or is unsupported."
+    local action=$1 i=$2 backend=${backends[$2]} lock_fd=${3:-} expected='' old_track old_title old_artist deadline now
+    # Coordinate with the global OSD key and other selector invocations.
+    if [[ -z $lock_fd ]]; then
+        exec {lock_fd}> "$RUNTIME_DIR/osd_media.lock"
+        flock -x "$lock_fd"
+    fi
+    unset 'metadata_cache[$backend]'
+    _backend_metadata "$backend"
+    case $status in
+        Playing|Paused|Stopped) ;;
+        *)
+            _report 'Player Unavailable' "${apps[i]} is no longer available."
+            exec {lock_fd}>&-
+            return 1 ;;
+    esac
+    if [[ $action == toggle ]]; then
+        if [[ $status == Playing ]]; then expected=Paused; else expected=Playing; fi
+    elif [[ $action == stop ]]; then expected=Stopped
+    fi
+    old_track=$track_id old_title=$title old_artist=$artist
+    if ! _control_source "$action" "$backend"; then
+        _report 'Playback Control Failed' "${apps[i]}: $action failed or is unsupported."
+        exec {lock_fd}>&-
         return 1
     fi
-    # Let asynchronous players publish their new status before notifying.
-    case $action in toggle) sleep 0.2 ;; *) sleep 0.4 ;; esac
-    unset 'metadata_cache[${backends[i]}]'
-    _read_metadata "$i" backend
-    _status_icon "$status"
-    _notify "${apps[i]}" "$REPLY $title${artist:+ · $artist} ($status)"
+    now=${EPOCHREALTIME/./}; deadline=$((now + 1000000))
+    while :; do
+        unset 'metadata_cache[$backend]'
+        _backend_metadata "$backend"
+        if [[ -z $status ]]; then
+            _report 'Player Unavailable' "${apps[i]} is no longer available."
+            exec {lock_fd}>&-
+            return 1
+        fi
+        if [[ -n $expected ]]; then
+            [[ $status != "$expected" ]] || break
+        elif [[ $track_id != "$old_track" || $title != "$old_title" || $artist != "$old_artist" || $status == Stopped ]]; then
+            break
+        fi
+        now=${EPOCHREALTIME/./}
+        if (( now >= deadline )); then
+            if [[ -n $expected ]]; then
+                _report 'Playback Control Failed' "${apps[i]} did not enter $expected state."
+                exec {lock_fd}>&-
+                return 1
+            fi
+            # Repeating/restarting a track need not change its metadata.
+            status="$action requested"
+            break
+        fi
+        sleep 0.025
+    done
+    if [[ $backend == mpris:* ]]; then
+        printf '%s\n' "${player_owners[${backend#mpris:}]}" > "$RUNTIME_DIR/osd_media_player.txt"
+        local other owner
+        local -a observed=() fields=()
+        for other in "${backends[@]}"; do
+            [[ $other == mpris:* ]] || continue
+            IFS=$SEP read -r -a fields <<< "${metadata_cache[$other]:-}"
+            owner=${player_owners[${other#mpris:}]:-}
+            if [[ ${fields[4]:-} == Playing && -n $owner ]]; then observed+=("$owner"); fi
+        done
+        jq -n --arg selected "${player_owners[${backend#mpris:}]}" --args '
+            {selected: $selected, playing: ($ARGS.positional | unique)}
+        ' "${observed[@]}" > "$RUNTIME_DIR/osd_media_context.json"
+    fi
+    exec {lock_fd}>&-
 }
 
 show_control_menu() {
@@ -409,32 +559,43 @@ show_source_menu() {
     done
 }
 
-cli_action() {
-    local action=$1 i fallback=''
+cli_action() (
+    local action=$1 i fallback='' remembered='' lock_fd
+    exec {lock_fd}> "$RUNTIME_DIR/osd_media.lock"
+    flock -x "$lock_fd"
     _load_sources || return 1
     ((${#ids[@]})) || return 0
+    if [[ -f $RUNTIME_DIR/osd_media_player.txt ]]; then
+        remembered=$(< "$RUNTIME_DIR/osd_media_player.txt")
+    fi
+    for i in "${!ids[@]}"; do
+        if [[ ${backends[i]} == mpris:* && -n $remembered &&
+              ${player_owners[${backends[i]#mpris:}]:-} == "$remembered" ]]; then
+            _perform_action "$action" "$i" "$lock_fd"
+            return $?
+        fi
+    done
     for i in "${!ids[@]}"; do
         [[ ${backends[i]} != pactl ]] || continue
         [[ -n $fallback ]] || fallback=$i
         _read_metadata "$i"
         if [[ ${status,,} == playing ]]; then
-            _perform_action "$action" "$i"
+            _perform_action "$action" "$i" "$lock_fd"
             return $?
         fi
     done
-    if [[ -n $fallback ]]; then _perform_action "$action" "$fallback"
+    if [[ -n $fallback ]]; then _perform_action "$action" "$fallback" "$lock_fd"
     else
-        _notify 'No Playback Controls' 'The current audio streams have no playback interface.'
+        _report 'No Playback Controls' 'The current audio streams have no playback interface.'
         return 1
     fi
-}
+)
 
 cli_status() {
     _load_sources || return 1
     ((${#ids[@]})) || return 0
-    local i body=''
-    for i in "${!ids[@]}"; do body+="${entries[i]}"$'\n'; done
-    _notify 'Media Sources' "${body%$'\n'}"
+    local i
+    for i in "${!ids[@]}"; do printf '%s\n' "${entries[i]}"; done
 }
 
 usage() {
@@ -446,10 +607,10 @@ Lists media sessions and additional streams with measured audio activity.
 Paused media stays resumable. Silent idle connections are hidden.
 Playback controls require a matching MPRIS/CLI interface.
 
-  --toggle      Play/Pause the first playing controllable source, or first controllable source
+  --toggle      Play/Pause the remembered MPRIS player, or first playing/controllable source
   --next        Skip to its next track
   --prev        Skip to its previous track
-  --status      Show available media sessions via notification
+  --status      Print available media sessions
   -h, --help    Show this help
 EOF_HELP
 }
@@ -462,13 +623,13 @@ main() {
         *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; return 1 ;;
     esac
     local cmd
-    for cmd in pactl jq notify-send python3 parec; do
+    for cmd in pactl jq python3 parec timeout flock; do
         command -v "$cmd" >/dev/null || { printf '%s: missing dependency: %s\n' "$APP_NAME" "$cmd" >&2; return 1; }
     done
     if [[ -z ${1:-} ]]; then
         command -v rofi >/dev/null || { printf '%s: missing dependency: rofi\n' "$APP_NAME" >&2; return 1; }
     fi
-    if command -v playerctl >/dev/null && command -v busctl >/dev/null; then HAS_MPRIS=1; fi
+    if command -v busctl >/dev/null; then HAS_MPRIS=1; fi
     case ${1:-} in
         --toggle) cli_action toggle ;;
         --next) cli_action next ;;

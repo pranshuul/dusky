@@ -20,9 +20,9 @@ Usage: dusky_glance_daemon.sh MODE [arguments]
   --gpu-power|--gpu-usage|--gpu-mem cardN intel|amd|nvidia
   --hud [cardN intel|amd|nvidia]
   --stop | --stop-all         Stop every active Dusky Glance instance
-  Other modes: --clock --clock-short --stopwatch --cpu-power --cpu --ram
-  --ram-temp --zram --temp --battery --battery-percent --battery-watts
-  --battery-time --disk --network* --uptime --workspace
+  Other modes: --clock --clock-short --stopwatch --cpu-power --cpu --cpu-freq --ram
+  --ram-available --ram-free --ram-dirty --ram-temp --zram --temp --load --battery
+  --battery-percent --battery-watts --battery-time --disk --network* --uptime --workspace
 USAGE
     exit 2
 }
@@ -51,7 +51,9 @@ validate_gpu() {
 case "$MODE" in
     --stop|--stop-all)
         (( $# == 1 )) || usage ;;
-    --clock|--clock-short|--stopwatch|--cpu-power|--cpu|--ram|\
+    --clock|--clock-short|--stopwatch|--cpu-power|--cpu|--cpu-freq|--cpu-frequency|--ram|\
+    --ram-available|--ram-avail|--ram-free|--ram-dirty|--dirty|\
+    --load|--loadavg|--load-avg|\
     --ram-temp|--zram|--temp|--battery|--battery-percent|--battery-watts|\
     --battery-time|--disk|--network|--network-down|--network-download|\
     --network-up|--network-upload|--network-combined|--network-speed|\
@@ -194,6 +196,10 @@ if [[ "$MODE" == --stop || "$MODE" == --stop-all ]]; then
 fi
 
 case "$MODE" in
+    --cpu-frequency) set -- --cpu-freq ;;
+    --loadavg|--load-avg) set -- --load ;;
+    --dirty) set -- --ram-dirty ;;
+    --ram-avail) set -- --ram-available ;;
     --network-download) set -- --network-down ;;
     --network-upload) set -- --network-up ;;
     --network-speed|--network-rate) set -- --network-combined ;;
@@ -695,6 +701,12 @@ CPU_PREV_IDLE=-1 CPU_PREV_TOTAL=-1
 CPU_POWER_PATH="" CPU_POWER_LAST=-5
 CPU_POWER_WARNED=0
 CPU_TEMP_PATH="" CPU_TEMP_LAST=-5
+CPU_FREQ_FILES=() CPU_FREQ_LAST=-10
+discover_cpu_freq_files() {
+    CPU_FREQ_FILES=(/sys/devices/system/cpu/cpufreq/policy*/scaling_cur_freq)
+    [[ -e "${CPU_FREQ_FILES[0]:-}" ]] || CPU_FREQ_FILES=(/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq)
+    [[ -e "${CPU_FREQ_FILES[0]:-}" ]] || CPU_FREQ_FILES=()
+}
 cpu_usage_once() {
     local -n _dest=$1
     local _tag _user _nice _system _idle _iowait _irq _softirq _steal
@@ -720,6 +732,41 @@ cpu_usage_once() {
         CPU_PREV_IDLE=$_idle_all CPU_PREV_TOTAL=$_total
     else
         CPU_PREV_IDLE=-1 CPU_PREV_TOTAL=-1
+    fi
+    return 0
+}
+cpu_freq_once() {
+    local -n _dest=$1
+    local max_khz=0 khz f hundredths dec
+    _dest=N/A
+    if (( ${#CPU_FREQ_FILES[@]} == 0 || SECONDS - CPU_FREQ_LAST >= 10 )); then
+        CPU_FREQ_LAST=$SECONDS
+        discover_cpu_freq_files
+    fi
+    if (( ${#CPU_FREQ_FILES[@]} > 0 )); then
+        for f in "${CPU_FREQ_FILES[@]}"; do
+            if { IFS= read -r khz < "$f"; } 2>/dev/null &&
+               [[ "$khz" =~ ^[0-9]+$ ]] && (( khz > max_khz )); then
+                max_khz=$khz
+            fi
+        done
+    else
+        local key val mhz
+        while read -r key val _; do
+            if [[ "$key" == "cpu" && "$val" == "MHz" ]]; then
+                read -r _ mhz _ <<< "$val"
+                mhz="${mhz%%.*}"
+                if [[ "$mhz" =~ ^[0-9]+$ ]] && (( mhz * 1000 > max_khz )); then
+                    max_khz=$((mhz * 1000))
+                fi
+            fi
+        done < /proc/cpuinfo 2>/dev/null || true
+    fi
+    if (( max_khz > 0 && max_khz <= 20000000 )); then
+        hundredths=$(((max_khz + 5000) / 10000))
+        dec=$((hundredths % 100))
+        (( dec < 10 )) && dec="0$dec"
+        _dest="$((hundredths / 100)).$dec"
     fi
     return 0
 }
@@ -766,18 +813,105 @@ cpu_temp_once() {
 }
 ram_once() {
     local -n _dest=$1
-    local key val total="" avail=""
+    local key val total="" avail="" free="" cached=""
     _dest=N/A
-    while read -r key val _; do
-        case "$key" in
-            MemTotal:) total=$val ;;
-            MemAvailable:) avail=$val ;;
-        esac
-        [[ -n "$total" && -n "$avail" ]] && break
-    done < /proc/meminfo
+    if ! {
+        while read -r key val _; do
+            case "$key" in
+                MemTotal:) total=$val ;;
+                MemAvailable:) avail=$val ;;
+                MemFree:) free=$val ;;
+                Cached:) cached=$val ;;
+            esac
+            [[ -n "$total" && -n "$avail" ]] && break
+        done < /proc/meminfo
+    } 2>/dev/null; then
+        return 0
+    fi
+    if [[ -z "$avail" && "$free" =~ ^[0-9]+$ && "$cached" =~ ^[0-9]+$ ]]; then
+        avail=$((free + cached))
+    fi
     if [[ "$total" =~ ^[0-9]+$ && "$avail" =~ ^[0-9]+$ ]] &&
        (( total > 0 && avail <= total )); then
         _dest="$(((total - avail) / 1024))"
+    fi
+    return 0
+}
+ram_available_once() {
+    local -n _dest=$1
+    local key val total="" avail="" free="" cached=""
+    _dest=N/A
+    if ! {
+        while read -r key val _; do
+            case "$key" in
+                MemTotal:) total=$val ;;
+                MemAvailable:) avail=$val; break ;;
+                MemFree:) free=$val ;;
+                Cached:) cached=$val ;;
+            esac
+        done < /proc/meminfo
+    } 2>/dev/null; then
+        return 0
+    fi
+    if [[ -z "$avail" && "$free" =~ ^[0-9]+$ && "$cached" =~ ^[0-9]+$ ]]; then
+        avail=$((free + cached))
+    fi
+    if [[ "$avail" =~ ^[0-9]+$ ]] &&
+       { [[ -z "$total" ]] || (( total <= 0 || avail <= total )); }; then
+        _dest="$((avail / 1024))"
+    fi
+    return 0
+}
+ram_free_once() {
+    local -n _dest=$1
+    local key val total="" free=""
+    _dest=N/A
+    if ! {
+        while read -r key val _; do
+            case "$key" in
+                MemTotal:) total=$val ;;
+                MemFree:) free=$val; break ;;
+            esac
+        done < /proc/meminfo
+    } 2>/dev/null; then
+        return 0
+    fi
+    if [[ "$free" =~ ^[0-9]+$ ]] &&
+       { [[ -z "$total" ]] || (( total <= 0 || free <= total )); }; then
+        _dest="$((free / 1024))"
+    fi
+    return 0
+}
+ram_dirty_once() {
+    local -n _dest=$1
+    local key val dirty="" writeback="" total_dirty
+    _dest=N/A
+    if ! {
+        while read -r key val _; do
+            case "$key" in
+                Dirty:) dirty=$val ;;
+                Writeback:) writeback=$val; break ;;
+            esac
+        done < /proc/meminfo
+    } 2>/dev/null; then
+        return 0
+    fi
+    if [[ "$dirty" =~ ^[0-9]+$ ]]; then
+        total_dirty=$dirty
+        if [[ "$writeback" =~ ^[0-9]+$ ]]; then
+            total_dirty=$((dirty + writeback))
+        fi
+        _dest="$((total_dirty / 1024))"
+    fi
+    return 0
+}
+load_once() {
+    local -n _dest=$1
+    local l1 l5 l15 _
+    _dest=N/A
+    if { read -r l1 l5 l15 _ < /proc/loadavg; } 2>/dev/null &&
+       [[ "$l1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        _dest="$l1"
     fi
     return 0
 }
@@ -1078,13 +1212,6 @@ format_hours_minutes() {
     local -n _dest=$1
     printf -v _dest '%dh%dm' "$(($2 / 60))" "$(($2 % 60))"
 }
-fresh_state_file() {
-    local modified age
-    modified=$(stat -c %Y -- "$1" 2>/dev/null) || return 1
-    [[ "$modified" =~ ^[0-9]+$ ]] || return 1
-    age=$((EPOCHSECONDS - modified))
-    (( age >= -5 && age <= 30 ))
-}
 
 case "$MODE" in
     --clock)
@@ -1247,9 +1374,37 @@ case "$MODE" in
             wait_tick
         done ;;
 
+    --cpu-freq)
+        while true; do
+            cpu_freq_once reading
+            send_osd "$reading"
+            wait_tick
+        done ;;
+
     --ram)
         while true; do
             ram_once reading
+            send_osd "$reading"
+            wait_tick
+        done ;;
+
+    --ram-available)
+        while true; do
+            ram_available_once reading
+            send_osd "$reading"
+            wait_tick
+        done ;;
+
+    --ram-free)
+        while true; do
+            ram_free_once reading
+            send_osd "$reading"
+            wait_tick
+        done ;;
+
+    --ram-dirty)
+        while true; do
+            ram_dirty_once reading
             send_osd "$reading"
             wait_tick
         done ;;
@@ -1585,100 +1740,30 @@ case "$MODE" in
     --network-down-session|--network-up-session|--network-session|\
     --network-boot-down|--network-boot-up|--network-boot)
         require_cmd systemctl
-        NET_STATE_DIR="$RUNTIME_DIR/waybar-net"
-        STATE_FILE="$NET_STATE_DIR/state"
-        EXT_STATE_FILE="$NET_STATE_DIR/state_ext"
-        HEARTBEAT_FILE="$NET_STATE_DIR/heartbeat"
-
-        wake_network_daemon() {
-            [[ -d "$NET_STATE_DIR" ]] || mkdir -p -- "$NET_STATE_DIR" 2>/dev/null || true
-            : > "$HEARTBEAT_FILE" 2>/dev/null || true
-            timeout --kill-after=1s 3s systemctl --user --kill-whom=main \
-                --signal=USR1 kill network_meter.service >/dev/null 2>&1 || \
-                timeout --kill-after=1s 3s systemctl --user start \
-                    network_meter.service >/dev/null 2>&1 || true
-        }
-
-        wake_network_daemon
-        last_network_wake=$SECONDS
-        last_fresh_check=-5
-        ext_fresh=false state_fresh=false
+        NETWORK_BIN="$HOME/.local/bin/dusky_network"
+        require_cmd "$NETWORK_BIN"
+        case "$MODE_BASE" in
+            network) network_mode=horizontal ;;
+            network-down) network_mode=down ;;
+            network-up) network_mode=up ;;
+            network-combined) network_mode=combined ;;
+            network-down-session) network_mode=session-down ;;
+            network-up-session) network_mode=session-up ;;
+            network-session) network_mode=session-total ;;
+            network-boot-down) network_mode=boot-down ;;
+            network-boot-up) network_mode=boot-up ;;
+            network-boot) network_mode=boot-total ;;
+        esac
+        timeout --kill-after=1s 3s systemctl --user start dusky_network.service >/dev/null 2>&1 || true
         while true; do
-            [[ -d "$NET_STATE_DIR" ]] && : > "$HEARTBEAT_FILE" 2>/dev/null || true
-            if (( SECONDS - last_fresh_check >= 5 )); then
-                last_fresh_check=$SECONDS
-                ext_fresh=false state_fresh=false
-                if fresh_state_file "$EXT_STATE_FILE"; then ext_fresh=true; fi
-                if fresh_state_file "$STATE_FILE"; then state_fresh=true; fi
-            fi
-            ext_ok=false state_ok=false
-            if [[ "$ext_fresh" == true && -r "$EXT_STATE_FILE" ]]; then
-                for ((attempt = 0; attempt < 3; attempt++)); do
-                    if read -r rx_fmt tx_fmt tot_fmt s_rx_fmt s_tx_fmt s_tot_fmt \
-                        b_rx_fmt b_tx_fmt b_tot_fmt cls iface _ _ _ _ _ _ _ < "$EXT_STATE_FILE" 2>/dev/null &&
-                       [[ -n "${rx_fmt:-}" && -n "${cls:-}" && -n "${iface:-}" ]]; then
-                        ext_ok=true
-                        break
-                    fi
-                done
-            fi
-            if [[ "$state_fresh" == true && -r "$STATE_FILE" ]]; then
-                for ((attempt = 0; attempt < 3; attempt++)); do
-                    if read -r state_unit state_up state_down state_class < "$STATE_FILE" 2>/dev/null &&
-                       [[ "$state_unit" == KB || "$state_unit" == MB ||
-                          "$state_unit" == GB || "$state_unit" == - ]] &&
-                       [[ -n "$state_up" && -n "$state_down" && -n "$state_class" ]]; then
-                        state_ok=true
-                        break
-                    fi
-                done
-            fi
+            reading=$("$NETWORK_BIN" osd "$network_mode") || reading=N/A
+            send_osd "$reading"
+            wait_tick
+        done ;;
 
-            if [[ "$ext_ok" == true ]]; then
-                if [[ "$cls" == network-disconnected || "$iface" == none ]]; then
-                    reading=Offline
-                else
-                    case "$MODE_BASE" in
-                        network-down) reading=$rx_fmt ;;
-                        network-up) reading=$tx_fmt ;;
-                        network-combined) reading=$tot_fmt ;;
-                        network-down-session) reading=$s_rx_fmt ;;
-                        network-up-session) reading=$s_tx_fmt ;;
-                        network-session) reading=$s_tot_fmt ;;
-                        network-boot-down) reading=$b_rx_fmt ;;
-                        network-boot-up) reading=$b_tx_fmt ;;
-                        network-boot) reading=$b_tot_fmt ;;
-                        network)
-                            if [[ "$state_ok" == true ]]; then
-                                short_unit="${state_unit%B}"
-                                [[ "$state_unit" == - ]] && short_unit=""
-                                reading="${state_up}${short_unit} ${state_down}${short_unit}"
-                            else
-                                reading="${tx_fmt} ${rx_fmt}"
-                            fi ;;
-                    esac
-                    [[ -n "$reading" ]] || reading=N/A
-                fi
-            elif [[ "$state_ok" == true ]]; then
-                if [[ "$state_class" == network-disconnected ]]; then
-                    reading=Offline
-                else
-                    short_unit="${state_unit%B}"
-                    [[ "$state_unit" == - ]] && short_unit=""
-                    case "$MODE_BASE" in
-                        network-down) reading="${state_down}${short_unit}" ;;
-                        network-up) reading="${state_up}${short_unit}" ;;
-                        network) reading="${state_up}${short_unit} ${state_down}${short_unit}" ;;
-                        *) reading=N/A ;;
-                    esac
-                fi
-            else
-                reading=N/A
-            fi
-            if [[ "$ext_ok" == false ]] && (( SECONDS - last_network_wake >= 5 )); then
-                wake_network_daemon
-                last_network_wake=$SECONDS
-            fi
+    --load)
+        while true; do
+            load_once reading
             send_osd "$reading"
             wait_tick
         done ;;

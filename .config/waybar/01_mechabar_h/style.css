@@ -1,5 +1,9 @@
 @import url("../matugen/generated/waybar-colors.css");
 
+/* Tooltip colors participate in the visual-effects switch. */
+@define-color tooltip_surface alpha(@surface_container, 0.57);
+@define-color tooltip_surface_high alpha(@surface_container_high, 0.57);
+
 @define-color hover-fg      alpha(@on_surface, 0.75);
 @define-color outline       shade(@background, 0.5);
 
@@ -7,20 +11,22 @@
    TRANSLUCENCY CONTROLS (GLASSY MODE)
    Tweak the decimals (0.0 to 1.0) here to adjust granular glassiness.
    ───────────────────────────────────────────────────────────────────────────── */
-@define-color glass_bar         alpha(@background, 1.0);
-@define-color glass_outline     alpha(@outline, 1.0);
-@define-color glass_tier_low    alpha(@surface_container_low, 1.0);
-@define-color glass_tier_mid    alpha(@surface, 1.0);
-@define-color glass_tier_high   alpha(@surface_container_high, 1.0);
-@define-color glass_apex        alpha(@secondary, 1.0);
-@define-color glass_tooltip     alpha(@background, 0.06);
-@define-color glass_menu        alpha(@background, 1.0);
+@define-color glass_bar         alpha(@background, 0.7);
+@define-color glass_outline     alpha(@outline, 0.7);
+@define-color glass_tier_low    alpha(@surface_container_low, 0.7);
+@define-color glass_tier_mid    alpha(@surface, 0.7);
+@define-color glass_tier_high   alpha(@surface_container_high, 0.7);
+@define-color glass_apex        alpha(@secondary, 0.7);
+@define-color glass_tooltip     alpha(@background, 0.85);
+@define-color glass_menu        alpha(@background, 0.7);
 
 /* ─────────────────────────────────────────────────────────────────────────────
    TRANSPARENCY TOGGLE
    ───────────────────────────────────────────────────────────────────────────── */
 
 /* WAYBAR_OPAQUE_SWITCH_START
+@define-color tooltip_surface @surface_container;
+@define-color tooltip_surface_high @surface_container_high;
 
 @define-color glass_bar         @background;
 @define-color glass_outline     @outline;
@@ -38,10 +44,20 @@ WAYBAR_OPAQUE_SWITCH_END */
 }
 
 * {
-	font-family: "Commit Mono Nerd Font";
+	font-family: "JetBrainsMono Nerd Font", monospace;
 	font-weight: bold;
 	font-size: 16px;
 }
+
+/* Prevent Waybar v0.16.0 AIconLabel anonymous outer box from injecting rogue padding/margins */
+widget > box {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+
 
 #window label,
 #mpris,
@@ -57,6 +73,11 @@ tooltip label {
 }
 
 #custom-power {
+	font-size: 18px;
+}
+
+#custom-net-speed-trigger,
+#custom-net-speed-trigger label {
 	font-size: 18px;
 }
 
@@ -125,6 +146,8 @@ tooltip label {
 }
 
 #cpu,
+#temperature,
+#group-cpu-drawer,
 #clock.time {
 	background-color: @glass_tier_high;
 	padding: 0 6px;
@@ -147,7 +170,7 @@ tooltip label {
 #custom-distro {
 	background-color: @glass_apex;
 	color: @background;
-	padding: 0 5px 0 5px;
+	padding: 0 4px 0 2px;
 }
 
 /*-----------------
@@ -156,6 +179,9 @@ tooltip label {
 
 #custom-left_div.1,
 #custom-right_div.1 {
+	color: @glass_tier_low;
+}
+#custom-right_div.6 {
 	color: @glass_tier_low;
 }
 #workspaces {
@@ -247,8 +273,8 @@ tooltip label {
 #custom-inhibit-suspend.disabled,
 #custom-net-speed.network-disconnected,
 #custom-updates.updated,
-#custom-notifications.dnd-none,
-#custom-notifications.dnd-inhibited-none,
+#custom-notifications.dnd,
+#custom-notifications.dnd,
 #mpris.paused,
 #pulseaudio.output.muted,
 #pulseaudio.input.source-muted,
@@ -262,13 +288,14 @@ tooltip label {
 
 #memory.warning,
 #cpu.warning,
-#battery.warning {
+#battery.warning:not(.charging):not(.plugged) {
 	color: @on_secondary_container;
 }
 
 #memory.critical,
 #cpu.critical,
-#battery.critical {
+#temperature.critical,
+#battery.critical:not(.charging):not(.plugged) {
 	color: @error;
 }
 
@@ -307,8 +334,8 @@ tooltip decoration {
 tooltip,
 tooltip.background,
 .tooltip {
-    background-color: alpha(@surface_container, 0.57);
-    background: linear-gradient(135deg, alpha(@surface_container, 0.57), alpha(@surface_container_high, 0.57));
+    background-color: @tooltip_surface;
+    background: linear-gradient(135deg, @tooltip_surface, @tooltip_surface_high);
     border: 1px solid alpha(@primary, 0.5);
     border-radius: 12px;
     box-shadow: none;

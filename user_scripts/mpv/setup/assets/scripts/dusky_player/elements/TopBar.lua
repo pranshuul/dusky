@@ -24,7 +24,7 @@ function TopBar:init()
 		mp.command(state.fullormaxed and 'set fullscreen no;set window-maximized no' or 'set window-maximized yes')
 	end
 
-	local close = {icon = 'close', hover_bg = '2311e8', hover_fg = 'ffffff', command = function() mp.command('quit') end}
+	local close = {icon = 'close', hover_bg = 'error', hover_fg = 'error_text', command = function() mp.command('quit') end}
 	local max = {icon = 'crop_square', command = maximized_command}
 	local min = {icon = 'minimize', command = function() mp.command('cycle window-minimized') end}
 	self.buttons = options.top_bar_controls == 'left' and {close, max, min} or {min, max, close}
@@ -240,8 +240,8 @@ function TopBar:render()
 			local rect = {ax = button_ax, ay = ay, bx = button_ax + self.size, by = by}
 			local is_hover = get_point_to_rectangle_proximity(cursor, rect) <= 0
 			local opacity = is_hover and 1 or config.opacity.controls
-			local button_fg = is_hover and (button.hover_fg or bg) or fg
-			local button_bg = is_hover and (button.hover_bg or fg) or bg
+			local button_fg = is_hover and (config.color[button.hover_fg] or fgt) or fg
+			local button_bg = is_hover and (config.color[button.hover_bg] or fg) or bg
 
 			cursor:zone('primary_click', rect, button.command)
 
@@ -271,11 +271,13 @@ function TopBar:render()
 		local left_aligned = options.top_bar_controls == 'left'
 		local title_ax, title_bx, title_ay = ax + margin, bx - margin, self.ay + margin
 
-		-- Playlist position
+		-- Playlist position & total duration
 		if state.has_playlist then
-			local text = state.playlist_pos .. '' .. state.playlist_count
-			local formatted_text = '{\\b1}' .. state.playlist_pos .. '{\\b0\\fs' .. self.font_size * 0.9 .. '}/'
-				.. state.playlist_count
+			local pos = state.playlist_pos or '-'
+			local dur_suffix = state.playlist_duration_human and (' · ' .. state.playlist_duration_human) or ''
+			local text = pos .. '/' .. state.playlist_count .. dur_suffix
+			local formatted_text = '{\\b1}' .. pos .. '{\\b0\\fs' .. self.font_size * 0.9 .. '}/'
+				.. state.playlist_count .. dur_suffix
 			local opts = {size = self.font_size, wrap = 2, color = fgt, opacity = visibility}
 			local rect_width = round(text_width(text, opts) + padding * 2)
 			local ax = left_aligned and title_bx - rect_width or title_ax

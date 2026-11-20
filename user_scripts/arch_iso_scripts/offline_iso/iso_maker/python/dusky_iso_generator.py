@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dusky Arch ISO Factory — offline official + AUR repositories and an archiso releng ISO (x86_64).
 
-Platform: Arch Linux · Linux 7.3+ · Python 3.14.7+ · pacman 7.1+ · archiso 91+ · rich 15+.
+Platform: Arch Linux · Linux 7.3+ · systemd 262+ · Python 3.15+ · Bash 5.3.20+ · pacman 7.1+ · archiso 91+ · rich 15+.
 Runs as root (re-execs itself through sudo); git/makepkg run as the invoking user.
 """
 
@@ -11,6 +11,7 @@ import concurrent.futures as cf
 import fcntl
 import functools
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -40,7 +41,7 @@ from pathlib import Path
 from typing import NoReturn
 
 # ═══════════════════════════════════ configuration ═══════════════════════════════════
-VERSION = "8.0.5-py314-2026.10"
+VERSION = "9.0.0-py315-2026.11"
 REPO_NAME = "archrepo"
 DB_NAME = f"{REPO_NAME}.db.tar.zst"
 FILES_NAME = f"{REPO_NAME}.files.tar.zst"
@@ -67,15 +68,22 @@ RELENG = Path("/usr/share/archiso/configs/releng")
 REEXEC_ENV = "DUSKY_FACTORY_REEXEC"
 DEFAULT_OFFICIAL = Path("/srv/offline-repo/official")
 DEFAULT_AUR = Path("/srv/offline-repo/aur")
+DEFAULT_ZSTD_LEVEL = 3
+ZSTD_LEVEL_MIN = 1
+ZSTD_LEVEL_MAX = 22
 ARCH_REPOS = frozenset({
     "core", "extra", "multilib", "core-testing", "extra-testing", "multilib-testing",
     "gnome-unstable", "kde-unstable",
 })
 EXCLUDED_REPO_PREFIXES = ("cachyos",)  # x86-64-v3/v4 rebuilds: not portable to generic x86_64
 VCS_SUFFIXES = ("-git", "-hg", "-svn", "-bzr")
-REQUIRED_AUR = frozenset({"paru"})
-LIVE_PKG_ALIASES = {"broadcom-wl": "broadcom-wl-dkms"}
-BOOTSTRAP_DEPS = {"git": "git", "mkarchiso": "archiso"}
+BOOTSTRAP_DEPS = {"git": "git", "mkarchiso": "archiso", "grub-mkstandalone": "grub"}
+PACKAGE_LIST_REL = Path("iso_maker/python/package_list")
+RECIPES_DIR_REL = Path("iso_maker/python/dusky_packages_compile")
+PACMAN_TOML = "01_pacman.toml"
+AUR_TOML = "02_aur.toml"
+DUSKY_TOML = "03_dusky.toml"
+ISO_PACKAGES_TOML = "04_iso_packages.toml"
 
 # action -> (official phase, AUR phase, ISO phase); dict order is the interactive menu order
 ACTIONS: dict[str, tuple[bool, bool, bool]] = {
@@ -187,107 +195,11 @@ MKARCHISO_HOOK = r'''    # --- dusky factory: offline repository (staged + sha25
         || { printf '[dusky] ERROR: offline repository injection failed\n' >&2; exit 1; }
 '''
 
-ALL_GROUPS: dict[str, list[str]] = {
-    "offline": [
-        "intel-ucode", "amd-ucode", "linux", "mkinitcpio", "terminus-font", "glaze", "python-cssselect", "base", "base-devel",
-        "python-lxml", "python-certifi", "python-charset-normalizer", "python-idna",
-        "python-requests", "python-urllib3", "deno", "yt-dlp", "yt-dlp-ejs", "hunspell",
-        "xf86-input-libinput", "xorg-xauth", "boost-libs", "plymouth", "grub", "os-prober",
-        "cryptsetup", "efibootmgr",
-    ],
-    "graphics": [
-        "intel-media-driver", "vpl-gpu-rt", "mesa", "vulkan-intel", "vulkan-radeon", "mesa-utils",
-        "intel-gpu-tools", "libva", "libva-utils", "vulkan-icd-loader", "vulkan-tools",
-        "sof-firmware", "linux-firmware", "linux-headers", "acpi_call", "kernel-modules-hook",
-        "linux-firmware-nvidia", "linux-firmware-amdgpu", "linux-firmware-radeon",
-        "linux-firmware-intel", "linux-firmware-mediatek", "linux-firmware-broadcom",
-        "linux-firmware-atheros", "linux-firmware-realtek", "linux-firmware-cirrus",
-        "linux-firmware-other", "linux-firmware-whence",
-    ],
-    "hyprland": [
-        "hyprland", "xorg-xwayland", "xdg-desktop-portal-hyprland", "xdg-desktop-portal-gtk",
-        "localsearch", "polkit", "dbus", "xdg-utils", "socat", "inotify-tools",
-        "libnotify", "mako", "file",
-    ],
-    "appearance": [
-        "qt5-wayland", "qt6-wayland", "gtk3", "gtk4", "glib2", "dconf", "gsettings-desktop-schemas", "nwg-look", "qt5ct", "qt6ct", "qt6-svg",
-        "qt6-multimedia-ffmpeg", "adw-gtk-theme", "upower", "plocate", "matugen",
-        "otf-font-awesome", "ttf-jetbrains-mono-nerd", "otf-atkinsonhyperlegiblemono-nerd",
-        "ttf-atkinson-hyperlegible", "otf-atkinson-hyperlegible",
-        "noto-fonts-emoji", "ttf-liberation", "sassc", "python-packaging", "python", "python-gobject",
-        "python-cairo", "python-opengl", "gtk-layer-shell", "python-evdev", "python-pyudev",
-        "fontconfig", "python-pyquery", "python-textual", "python-rich", "python-regex", "python-pillow", "papirus-icon-theme",
-    ],
-    "desktop": [
-        "awww", "hyprlock", "hypridle", "hyprsunset", "hyprpicker", "rofi", "hyprshutdown",
-        "libdbusmenu-qt5", "libdbusmenu-glib", "brightnessctl",
-    ],
-    "audio": [
-        "pipewire", "pipewire-alsa", "alsa-utils", "wireplumber", "pipewire-pulse", "playerctl",
-        "bluez", "bluez-utils", "bluez-hid2hci", "bluez-libs", "bluez-obex", "blueman", "bluetui",
-        "pavucontrol", "gst-plugins-base", "gst-libav", "gst-plugins-bad", "gst-plugins-good",
-        "gst-plugins-ugly", "gst-plugin-pipewire", "libcanberra", "songrec", "sox", "rnnoise",
-    ],
-    "filesystem": [
-        "btrfs-progs", "compsize", "zram-generator", "udisks2", "udiskie", "dosfstools",
-        "xdg-user-dirs", "usbutils", "gnome-disk-utility", "unzip", "zip", "tar", "unrar",
-        "7zip", "cpio", "file-roller", "rsync", "nfs-utils", "nilfs-utils", "smartmontools",
-        "dmraid", "hdparm", "hwdetect", "lsscsi", "sg3_utils", "cpupower", "dust", "dkms",
-        "thunar", "thunar-archive-plugin", "thunar-volman", "thunar-media-tags-plugin",
-        "thunar-shares-plugin", "thunar-vcs-plugin", "tumbler", "ffmpegthumbnailer",
-        "webp-pixbuf-loader", "poppler-glib", "libgsf", "libgepub", "libopenraw", "resvg",
-        "gvfs", "gvfs-mtp", "gvfs-nfs", "gvfs-smb", "gvfs-gphoto2", "gvfs-afc", "gvfs-dnssd",
-        "catfish", "gnome-keyring", "meld", "xreader", "imagemagick", "kio-admin",
-    ],
-    "network": [
-        "networkmanager", "wireless-regdb", "iwd", "nm-connection-editor", "inetutils", "wget",
-        "curl", "openssh", "ufw", "wayvnc", "vsftpd", "reflector", "bmon", "ethtool", "httrack", "wavemon",
-        "firefox", "nss-mdns", "dnsmasq", "modemmanager", "usb_modeswitch",
-    ],
-    "terminal": [
-        "kitty", "foot", "zsh", "zsh-syntax-highlighting", "starship", "fastfetch", "bat", "eza",
-        "fd", "yazi", "gum", "tree", "fzf", "less", "ripgrep", "expac", "zsh-autosuggestions",
-        "iperf3", "pkgstats", "libqalculate", "moreutils", "zoxide", "man-db", "lsof", "khal",
-    ],
-    "dev": [
-        "neovim", "git", "git-delta", "lazygit", "meson", "cmake", "clang", "uv", "rq", "jq",
-        "pv", "bc", "viu", "chafa", "ueberzugpp", "ccache", "mold", "shellcheck", "shfmt",
-        "stylua", "prettier", "tree-sitter-cli", "nano", "lua51", "luarocks",
-    ],
-    "multimedia": [
-        "ffmpeg", "mpv", "mpv-mpris", "satty", "swayimg", "resvg", "imagemagick", "libheif",
-        "ffmpegthumbnailer", "grim", "slurp", "wl-clipboard", "wl-clip-persist", "cliphist",
-        "tesseract-data-eng", "gpu-screen-recorder-ui", "ddcutil",
-    ],
-    "sysadmin": [
-        "btop", "htop", "dgop", "nvtop", "inxi", "sysstat", "sysbench", "logrotate", "acpid",
-        "tlp", "tlp-rdw", "thermald", "powertop", "gdu", "iotop", "iftop", "lshw", "hwinfo",
-        "dmidecode", "strace", "wev", "pacman-contrib", "libsecret", "seahorse", "greetd-agreety",
-        "greetd", "greetd-tuigreet", "yad", "dysk", "fwupd", "perl", "accountsservice",
-        "pkgfile", "rebuild-detector",
-    ],
-    "gnome": [
-        "snapshot", "cameractrls", "loupe", "mousepad", "gnome-calculator", "gnome-clocks",
-    ],
-    "productivity": ["zathura", "zathura-pdf-mupdf", "cava"],
-    "btrfs": ["snapper"],
-}
-
-AUR_SEED: tuple[str, ...] = (
-    "wlogout",
-    "adwaita-qt6",
-    "adwaita-qt5",
-    "adwsteamgtk",
-    "hyprshade",
-    "peaclock",
-    "tray-tui",
-    "xdg-terminal-exec",
-    "paru",
-    "waybar-git",
-    "papirus-folders",
-    "bibata-cursor-theme-bin",
-)
-
+# Run after package hooks and boot-image preparation, before compressing the live filesystem.
+# Leave locale-archive and the offline package archives intact for UTF-8 and installation.
+MKARCHISO_CLEANUP_HOOK = r'''    printf '[dusky] INFO: removing live documentation and message translations\n'
+    _unshare rm -rf -- "${pacstrap_dir}"/usr/{,local/}share/{doc,man,info,gtk-doc,locale}
+'''
 
 # ═══════════════════════ pre-rich: errors, host lock, CLI, bootstrap ═══════════════════════
 class FactoryError(Exception):
@@ -306,48 +218,55 @@ def die(msg: str) -> NoReturn:
     raise FactoryError(msg)
 
 
-def _lock_holders(lock: Path) -> list[int]:
-    """PIDs with `lock` open. libalpm keeps db.lck open for the whole transaction, so
-    'file exists but no process holds it' is the one reliable staleness signal (covers
-    pacman, paru/yay, pamac, PackageKit — any libalpm frontend)."""
-    target = os.fspath(lock)
-    holders: list[int] = []
-    for pid in os.listdir("/proc"):
-        if not pid.isdigit():
-            continue
-        fd_dir = f"/proc/{pid}/fd"
-        try:
-            fds = os.listdir(fd_dir)
-        except OSError:
-            continue
-        for fd in fds:
-            try:
-                if os.readlink(f"{fd_dir}/{fd}") == target:
-                    holders.append(int(pid))
-                    break
-            except OSError:
-                continue
-    return holders
-
-
 def wait_for_host_pacman_lock(say: Callable[[str], object], timeout: float = 600.0) -> None:
+    """Wait without unlinking a lock that another frontend may have just acquired."""
     if not HOST_DB_LOCK.exists():
         return
-    say(f"{HOST_DB_LOCK} present; waiting for its holder...")
+    say(f"{HOST_DB_LOCK} present; waiting for the package transaction...")
     deadline = time.monotonic() + timeout
-    unheld = 0
     while HOST_DB_LOCK.exists():
-        if _lock_holders(HOST_DB_LOCK):
-            unheld = 0
-        else:
-            unheld += 1
-            if unheld >= 2:  # two observations 1 s apart: not the close()->unlink() window of a live pacman
-                say("stale pacman lock (no process holds it open); removing")
-                HOST_DB_LOCK.unlink(missing_ok=True)
-                break
         if time.monotonic() >= deadline:
-            die(f"{HOST_DB_LOCK} still held after {int(timeout)} s")
+            die(f"{HOST_DB_LOCK} still present after {int(timeout)} s; "
+                "inspect the active transaction or stale lock before retrying. The lock was not removed.")
         time.sleep(1.0)
+
+
+def parse_zstd_level(raw: str) -> int | None:
+    try:
+        level = int(raw.strip())
+    except ValueError:
+        return None
+    return level if ZSTD_LEVEL_MIN <= level <= ZSTD_LEVEL_MAX else None
+
+
+def _zstd_level_type(val: str) -> int:
+    if (level := parse_zstd_level(val)) is not None:
+        return level
+    raise argparse.ArgumentTypeError(
+        f"zstd compression level must be between {ZSTD_LEVEL_MIN} and {ZSTD_LEVEL_MAX}, got {val!r}"
+    )
+
+
+def validate_iso_name(raw: str) -> str:
+    if "\x00" in raw or any(ord(c) < 32 for c in raw):
+        raise ValueError(f"invalid --iso-name {raw!r}: contains control or NUL characters")
+    name = raw.strip()
+    if (
+        not name
+        or name in {".", "..", ".iso"}
+        or "/" in name
+        or "\\" in name
+        or Path(name).name != name
+    ):
+        raise ValueError(f"invalid --iso-name {raw!r}: must be a plain filename without path separators")
+    return name
+
+
+def _iso_name_type(val: str) -> str:
+    try:
+        return validate_iso_name(val)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -358,8 +277,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "releng ISO (x86_64 only). Re-executes itself as root through sudo.",
         epilog=f"actions:\n{actions}\n\n"
         "environment:\n"
-        "  DUSKY_DOTFILES_PIN   commit/ref of github.com/dusklinux/dusky to inject into /etc/skel\n"
-        "  DUSKY_DOTFILES_SHA   expected dotfiles HEAD (full sha or prefix); mismatch aborts\n\n"
+        "  DUSKY_DOTFILES_PIN   build branch/tag/commit of github.com/dusklinux/dusky (default: main; --ref takes precedence)\n"
+        "  DUSKY_DOTFILES_SHA   expected build HEAD (full sha or prefix); mismatch aborts\n"
+        f"  DUSKY_ZSTD_LEVEL     SquashFS Zstd compression level ({ZSTD_LEVEL_MIN}-{ZSTD_LEVEL_MAX}, default: {DEFAULT_ZSTD_LEVEL}; --zstd-level takes precedence)\n\n"
         f"version {VERSION}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         suggest_on_error=True,
@@ -371,10 +291,18 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                         help=f"ISO workspace base (default: {ZRAM_CANDIDATE} if mounted, else /tmp)")
     parser.add_argument("--output-dir", type=Path, metavar="DIR",
                         help=f"ISO output directory (default: {ZRAM_CANDIDATE} if mounted, else ~/dusky_isos)")
+    parser.add_argument("--ref", metavar="REF",
+                        help="build branch, tag, or full commit SHA (default: DUSKY_DOTFILES_PIN or main)")
     parser.add_argument("--source-dir", type=Path, metavar="DIR",
-                        help="installer payload (default: ~/user_scripts/arch_iso_scripts/offline_iso)")
+                        help="explicit installer payload override (default: selected Git checkout; "
+                             "dotfiles and recipes still come from --ref)")
     parser.add_argument("--rebuild-local", action="store_true",
                         help="rebuild all local ISO recipes even when cached inputs match")
+    parser.add_argument("--zstd-level", "-z", type=_zstd_level_type, default=None, metavar="1-22",
+                        help=f"SquashFS Zstd compression level ({ZSTD_LEVEL_MIN}-{ZSTD_LEVEL_MAX}, "
+                             f"default: {DEFAULT_ZSTD_LEVEL} or DUSKY_ZSTD_LEVEL)")
+    parser.add_argument("--iso-name", type=_iso_name_type, metavar="NAME",
+                        help="custom ISO output filename (default: dusky_MM_YY.iso)")
     parser.add_argument("--auto", action="store_true", help="non-interactive; default action official_iso")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     return parser.parse_args(argv)
@@ -527,6 +455,7 @@ def run(
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
     capture: bool = False,
+    capture_stderr: bool = False,
     merge: bool = False,
     log: Path | None = None,
     timeout: float | None = None,
@@ -544,14 +473,14 @@ def run(
             stdout, stderr = log_fh, subprocess.STDOUT
         else:
             stdout = subprocess.PIPE if capture else None
-            stderr = subprocess.STDOUT if merge else (subprocess.PIPE if capture else None)
+            stderr = subprocess.STDOUT if merge else (subprocess.PIPE if capture or capture_stderr else None)
         with subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, cwd=cwd, env=env,
             encoding="utf-8", errors="replace", process_group=0, **creds,
         ) as proc:
-            with _children_lock:
-                _children.add(proc)
             try:
+                with _children_lock:
+                    _children.add(proc)
                 out, errout = proc.communicate(timeout=timeout)
             except BaseException:
                 _kill_group(proc)
@@ -1284,11 +1213,15 @@ class IsolatedDB:
             shutil.copyfile(HOST_MIRRORLIST, mirrorlist)
         if shutil.which("reflector"):
             tmp = self.root / "mirrorlist.reflector"
-            r = run(["reflector", "--latest", "20", "--protocol", "https", "--download-timeout", "3",
-                     "--save", tmp], capture=True, merge=True)
+            try:
+                r = run(["reflector", "--latest", "20", "--protocol", "https", "--sort", "rate",
+                         "--connection-timeout", "3", "--download-timeout", "3", "--save", tmp],
+                        capture=True, merge=True, timeout=120)
+            except subprocess.TimeoutExpired:
+                r = subprocess.CompletedProcess(["reflector"], 124)
             if r.returncode == 0 and tmp.is_file() and tmp.stat().st_size > 100:
                 os.replace(tmp, mirrorlist)
-                step("isolated mirrorlist: reflector (20 freshest HTTPS mirrors)")
+                step("isolated mirrorlist: 20 fresh HTTPS mirrors ranked by measured download rate")
             else:
                 step("reflector failed; using the host mirrorlist")
         lines = [
@@ -1317,10 +1250,30 @@ class IsolatedDB:
         self.conf.write_text("\n".join(lines) + "\n", encoding="utf-8")
         step(f"isolated pacman.conf: {self.conf} (repos: {' '.join(self.repos)})")
 
-    def pacman(self, *args: str, capture: bool = True) -> subprocess.CompletedProcess[str]:
+    def pacman(self, *args: str, capture: bool = True,
+               capture_stderr: bool = False) -> subprocess.CompletedProcess[str]:
         color = "never" if capture else "auto"
         return run(["pacman", "--config", self.conf, "--noconfirm", "--color", color, *args],
-                   env=os.environ | {"LC_ALL": "C"}, capture=capture)
+                   env=os.environ | {"LC_ALL": "C"}, capture=capture, capture_stderr=capture_stderr)
+
+    def _retry_mirrors(self, errors: str) -> None:
+        """Demote failed servers for the next transaction; retain fallback mirrors."""
+        mirrorlist = self.root / "mirrorlist"
+        if not mirrorlist.is_file():
+            return
+        servers = [line for line in mirrorlist.read_text(encoding="utf-8").splitlines()
+                   if line.strip().startswith("Server") and "=" in line]
+        if len(servers) < 2:
+            return
+        failed = set(re.findall(r"from (\S+) :", errors))
+        good, bad = [], []
+        for line in servers:
+            host = urllib.parse.urlsplit(line.split("=", 1)[1].strip()).netloc
+            (bad if host in failed else good).append(line)
+        # Unknown errors or failures across every mirror: change the first choice.
+        ordered = good + bad if good and bad else servers[1:] + servers[:1]
+        mirrorlist.write_text("\n".join(ordered) + "\n", encoding="utf-8")
+        step(f"retry mirror priority: {ordered[0].split('=', 1)[1].strip()}")
 
     def _sync(self) -> None:
         for attempt in range(1, SYNC_ATTEMPTS + 1):
@@ -1331,6 +1284,7 @@ class IsolatedDB:
                 return
             warn(f"sync failed: {pacman_errors(r, 500)}")
             if attempt < SYNC_ATTEMPTS:
+                self._retry_mirrors(r.stderr or "")
                 backoff(attempt)
         die("isolated DB sync failed — check network/keyring")
 
@@ -1383,10 +1337,14 @@ class IsolatedDB:
         the transaction (cached ones included) before returning 0 — no second verification pass."""
         for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
             info(f"pacman -Sw attempt {attempt}/{DOWNLOAD_ATTEMPTS} ({len(targets)} targets)")
-            r = self.pacman("-Sw", *self._cache_args(cachedirs), "--", *targets, capture=False)
+            r = self.pacman("-Sw", *self._cache_args(cachedirs), "--", *targets,
+                            capture=False, capture_stderr=True)
+            if r.stderr:
+                print(r.stderr, file=sys.stderr, end="", flush=True)
             if r.returncode == 0:
                 return
             if attempt < DOWNLOAD_ATTEMPTS:
+                self._retry_mirrors(r.stderr or "")
                 backoff(attempt)
         die("package download failed after retries")
 
@@ -1402,7 +1360,194 @@ class IsolatedDB:
             die("isolated DB already has a different local repository attached")
 
 
-# ═══════════════════════════════ master list & official phase ═══════════════════════════════
+# ═══════════════════════════ package manifests & official phase ═══════════════════════════
+@dataclass(frozen=True, slots=True)
+class PackageManifests:
+    pacman_groups: dict[str, tuple[str, ...]]
+    aur_seeds: tuple[str, ...]
+    aur_required: frozenset[str]
+    dusky_packages: tuple[str, ...]
+    iso_packages: tuple[str, ...]
+    iso_exclude_live: frozenset[str]
+    iso_aliases: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class RecipeSpec:
+    package: str
+    recipe_dir: Path
+    source_rel: Path
+    tools: tuple[str, ...]
+
+
+def _load_toml_file(path: Path, allowed_keys: frozenset[str] | None = None) -> dict[str, object]:
+    if not path.is_file():
+        die(f"missing package manifest: {path}")
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        die(f"{path}: failed to parse TOML ({exc})")
+    if not isinstance(data, dict):
+        die(f"{path}: top-level TOML value must be a table")
+    if allowed_keys is not None and (unknown := sorted(set(data) - allowed_keys)):
+        die(f"{path}: unrecognized top-level key(s): {', '.join(unknown)}")
+    return data
+
+
+def _parse_pkg_array(raw: object, *, origin: str, allow_empty: bool = True) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        die(f"{origin}: expected a list of package names")
+    cleaned: list[str] = []
+    for idx, item in enumerate(raw):
+        if not isinstance(item, str):
+            die(f"{origin}[{idx}]: expected string, got {type(item).__name__}")
+        pkg = item.strip()
+        if not PKGNAME_RE.fullmatch(pkg):
+            die(f"{origin}[{idx}]: invalid package name {item!r}")
+        cleaned.append(pkg)
+    deduped = tuple(dict.fromkeys(cleaned))
+    if not allow_empty and not deduped:
+        die(f"{origin}: package list cannot be empty")
+    return deduped
+
+
+def _parse_pkg_aliases(raw: object, *, origin: str) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        die(f"{origin}: expected a table of old_name = new_name string pairs")
+    aliases: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            die(f"{origin}: alias keys and targets must be strings")
+        src, dst = k.strip(), v.strip()
+        if not PKGNAME_RE.fullmatch(src) or not PKGNAME_RE.fullmatch(dst):
+            die(f"{origin}: invalid package alias {k!r} -> {v!r}")
+        aliases[src] = dst
+    return aliases
+
+
+def load_package_manifests(source_dir: Path) -> PackageManifests:
+    pkg_dir = source_dir / PACKAGE_LIST_REL
+    if not pkg_dir.is_dir():
+        die(f"package_list directory missing: {pkg_dir}")
+
+    # 1. 01_pacman.toml
+    p1_path = pkg_dir / PACMAN_TOML
+    p1_raw = _load_toml_file(p1_path)
+    groups_obj = p1_raw.get("groups", p1_raw) if "groups" in p1_raw and len(p1_raw) == 1 else p1_raw
+    if not isinstance(groups_obj, dict) or not groups_obj:
+        die(f"{p1_path}: expected non-empty package groups")
+    pacman_groups: dict[str, tuple[str, ...]] = {}
+    for group_name, pkg_list in groups_obj.items():
+        if not isinstance(group_name, str) or not group_name.strip():
+            die(f"{p1_path}: invalid group name {group_name!r}")
+        pacman_groups[group_name] = _parse_pkg_array(
+            pkg_list, origin=f"{p1_path.name}:{group_name}", allow_empty=True
+        )
+    if not any(pacman_groups.values()):
+        die(f"{p1_path}: all package groups are empty")
+
+    # 2. 02_aur.toml
+    p2_path = pkg_dir / AUR_TOML
+    p2_raw = _load_toml_file(p2_path, frozenset({"packages", "required"}))
+    aur_seeds = _parse_pkg_array(p2_raw.get("packages", []), origin=f"{p2_path.name}:packages", allow_empty=True)
+    aur_required = frozenset(
+        _parse_pkg_array(p2_raw.get("required", []), origin=f"{p2_path.name}:required", allow_empty=True)
+    )
+    if orphan_req := sorted(aur_required - set(aur_seeds)):
+        warn(f"{p2_path.name}: required package(s) not listed in packages (ignoring requirement): {', '.join(orphan_req)}")
+        aur_required -= set(orphan_req)
+
+    # 3. 03_dusky.toml
+    p3_path = pkg_dir / DUSKY_TOML
+    p3_raw = _load_toml_file(p3_path, frozenset({"packages"}))
+    dusky_packages = _parse_pkg_array(
+        p3_raw.get("packages", []), origin=f"{p3_path.name}:packages", allow_empty=True
+    )
+
+    # 4. 04_iso_packages.toml
+    p4_path = pkg_dir / ISO_PACKAGES_TOML
+    p4_raw = _load_toml_file(p4_path, frozenset({"packages", "exclude_live_build", "aliases"}))
+    iso_packages = _parse_pkg_array(
+        p4_raw.get("packages"), origin=f"{p4_path.name}:packages", allow_empty=False
+    )
+    iso_exclude_live = frozenset(
+        _parse_pkg_array(
+            p4_raw.get("exclude_live_build", []),
+            origin=f"{p4_path.name}:exclude_live_build",
+            allow_empty=True,
+        )
+    )
+    iso_aliases = _parse_pkg_aliases(p4_raw.get("aliases"), origin=f"{p4_path.name}:aliases")
+
+    return PackageManifests(
+        pacman_groups=pacman_groups,
+        aur_seeds=aur_seeds,
+        aur_required=aur_required,
+        dusky_packages=dusky_packages,
+        iso_packages=iso_packages,
+        iso_exclude_live=iso_exclude_live,
+        iso_aliases=iso_aliases,
+    )
+
+
+def discover_local_recipes(source_dir: Path) -> dict[str, RecipeSpec]:
+    """Scan dusky_packages_compile/*/recipe.toml and index all valid local recipes by package name."""
+    recipes_dir = source_dir / RECIPES_DIR_REL
+    if not recipes_dir.is_dir():
+        return {}
+    discovered: dict[str, RecipeSpec] = {}
+    for child in sorted(recipes_dir.iterdir()):
+        toml_path = child / "recipe.toml"
+        if not child.is_dir() or not toml_path.is_file():
+            continue
+        if not (child / "PKGBUILD").is_file():
+            die(f"{child}: recipe.toml requires a companion PKGBUILD")
+        try:
+            spec = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+            name = spec["package"]
+            source_rel = Path(spec["source"])
+            tools = spec.get("tools", [])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            die(f"{toml_path}: invalid recipe.toml ({exc})")
+        if (not isinstance(name, str) or not PKGNAME_RE.fullmatch(name)
+                or not isinstance(tools, list)
+                or not all(isinstance(t, str) and re.fullmatch(r"[A-Za-z0-9._+-]+", t) for t in tools)
+                or source_rel.is_absolute() or ".." in source_rel.parts):
+            die(f"{toml_path}: invalid package name, tools, or source path")
+        if name in discovered:
+            die(f"duplicate local recipe for package {name!r}: {discovered[name].recipe_dir} and {child}")
+        discovered[name] = RecipeSpec(
+            package=name, recipe_dir=child, source_rel=source_rel, tools=tuple(tools)
+        )
+    return discovered
+
+
+_PKGBUILD_DEPENDS_RE = re.compile(r"(?ms)^\s*depends(?:_x86_64)?\s*\+?=\s*\((.*?)\)")
+
+
+def extract_recipe_runtime_deps(source_dir: Path, manifests: PackageManifests) -> list[str]:
+    """Extract runtime `depends` from enabled 03_dusky.toml PKGBUILDs so official/AUR phases include them."""
+    if not manifests.dusky_packages:
+        return []
+    recipes = discover_local_recipes(source_dir)
+    custom_set = set(manifests.dusky_packages) | set(recipes)
+    runtime_deps: list[str] = []
+    for pkg in manifests.dusky_packages:
+        spec = recipes.get(pkg)
+        if spec is None:
+            die(f"{DUSKY_TOML} enables {pkg!r}, but no recipe exists in {source_dir / RECIPES_DIR_REL}")
+        pkgbuild_txt = (spec.recipe_dir / "PKGBUILD").read_text(encoding="utf-8")
+        cleaned = "\n".join(line.split("#", 1)[0] for line in pkgbuild_txt.splitlines())
+        for match in _PKGBUILD_DEPENDS_RE.finditer(cleaned):
+            for token in shlex.split(match[1], posix=True):
+                name = dep_name(token)
+                if name and name not in custom_set and is_aur_candidate(name):
+                    runtime_deps.append(name)
+    return list(dict.fromkeys(runtime_deps))
+
+
 def installer_package_targets(source_dir: Path) -> list[str]:
     """Read installation targets from the installer rather than duplicating its list."""
     installer = source_dir / "130_chroot_package_installer.sh"
@@ -1413,36 +1558,49 @@ def installer_package_targets(source_dir: Path) -> list[str]:
     return list(dict.fromkeys(targets))
 
 
-def build_master_list(external: Path | None) -> list[str]:
+def build_master_list(source_dir: Path, manifests: PackageManifests) -> list[str]:
     seen: set[str] = set()
     master: list[str] = []
-    table = Table(title="Package Groups", box=box.SIMPLE)
+    table = Table(title="Package Groups (01_pacman.toml)", box=box.SIMPLE)
     table.add_column("Group", style="magenta")
     table.add_column("Count", style="cyan")
     table.add_column("Unique", style="green")
-    for group, pkgs in ALL_GROUPS.items():
+    for group, pkgs in manifests.pacman_groups.items():
         new = 0
         for p in pkgs:
-            if not PKGNAME_RE.fullmatch(p):
-                warn(f"invalid package name {p!r} in {group}")
-            elif p not in seen:
+            if p not in seen:
                 seen.add(p)
                 master.append(p)
                 new += 1
         table.add_row(group, str(len(pkgs)), str(new))
     console.print(table)
-    if external is not None and external.is_file():
-        try:
-            added = 0
-            for raw in external.read_text(encoding="utf-8").splitlines():
-                pkg = raw.split("#", 1)[0].strip()
-                if pkg and PKGNAME_RE.fullmatch(pkg) and pkg not in seen:
-                    seen.add(pkg)
-                    master.append(pkg)
-                    added += 1
-            step(f"external list {external}: {added} unique")
-        except (OSError, UnicodeDecodeError) as exc:
-            warn(f"external list unreadable: {exc}")
+
+    iso_added = 0
+    for pkg in manifests.iso_packages:
+        if pkg not in seen:
+            seen.add(pkg)
+            master.append(pkg)
+            iso_added += 1
+    step(f"{ISO_PACKAGES_TOML}: {iso_added} additional unique package(s)")
+
+    recipe_deps = extract_recipe_runtime_deps(source_dir, manifests)
+    dep_added = 0
+    for dep in recipe_deps:
+        if dep not in seen:
+            seen.add(dep)
+            master.append(dep)
+            dep_added += 1
+    if dep_added:
+        step(f"{DUSKY_TOML} runtime depends: {dep_added} additional unique package(s)")
+
+    for target in installer_package_targets(source_dir):
+        if target not in seen:
+            seen.add(target)
+            master.append(target)
+
+    # Filter out custom local recipe package names so official/AUR phases never query AUR RPC for them
+    custom_all = set(manifests.dusky_packages) | set(discover_local_recipes(source_dir))
+    master = [p for p in master if p not in custom_all]
     if not master:
         die("master package list empty")
     ok(f"master list: {len(master)} unique names")
@@ -1478,11 +1636,12 @@ def ingest_host_cache_packages(repo: Path, files: Collection[str]) -> int:
     return copied
 
 
-def official_phase(db: IsolatedDB, master: Sequence[str], repo: Path, user: RealUser) -> None:
+def official_phase(db: IsolatedDB, master: Sequence[str], manifests: PackageManifests,
+                   repo: Path, user: RealUser) -> None:
     info("=== OFFICIAL REPO BUILD ===")
     require_tool("repo-add", "pacman")
     official, unresolved = db.resolve_names(master)
-    migrated, _ = db.resolve_names(AUR_SEED)
+    migrated, _ = db.resolve_names(manifests.aur_seeds)
     official = list(dict.fromkeys([*official, *migrated]))
     if unresolved:
         shown = ", ".join(unresolved[:40]) + ("…" if len(unresolved) > 40 else "")
@@ -1500,8 +1659,6 @@ def official_phase(db: IsolatedDB, master: Sequence[str], repo: Path, user: Real
     need = sum(size for *_, size in closure)
     ok(f"closure: {len(files)} packages, {human_bytes(need)} to download")
     old = load_db_by_filename(repo)
-    # Anything not already indexed (new, resized, or left unvalidated by a crashed run) forces one
-    # pacman -Sw, which signature-validates the entire closure; a fully indexed closure skips it.
     unindexed = sum(1 for fn in files if (e := old.get(fn)) is None or file_size(repo / fn) != e.csize)
     if need or unindexed:
         ensure_disk_space(repo, int(need * 1.35) + (512 << 20), "official package download")
@@ -1930,7 +2087,8 @@ def finalize_aur_repo(db: IsolatedDB, repo: Path, official: Path | None, keep_na
     restore_ownership(repo, user)
 
 
-def aur_phase(db: IsolatedDB, master: Sequence[str], repo: Path, official: Path, user: RealUser) -> None:
+def aur_phase(db: IsolatedDB, master: Sequence[str], manifests: PackageManifests,
+              repo: Path, official: Path, user: RealUser) -> None:
     info("=== AUR REPO BUILD ===")
     for tool, hint in (("git", "git"), ("makepkg", "pacman"), ("gcc", "base-devel"), ("make", "base-devel")):
         require_tool(tool, hint)
@@ -1938,10 +2096,13 @@ def aur_phase(db: IsolatedDB, master: Sequence[str], repo: Path, official: Path,
     repo.mkdir(parents=True, exist_ok=True)
     ensure_disk_space(repo, 2 << 30, "AUR builds")
     _, unresolved = db.resolve_names(master)
-    seeds = [*AUR_SEED, *(n for n in unresolved if is_aur_candidate(n))]
+    custom_known = custom_package_names(repo) | set(manifests.dusky_packages)
+    seeds = [*manifests.aur_seeds, *(n for n in unresolved if n not in custom_known and is_aur_candidate(n))]
     builder = AurBuilder(db, repo, official if official.is_dir() else None, user)
     builder.run(seeds)
-    builder.keep_names.update(custom_package_names(repo) & builder.index.keys())
+    # Retain only currently enabled custom packages in the AUR repo
+    enabled_custom = custom_package_names(repo) & set(manifests.dusky_packages) & builder.index.keys()
+    builder.keep_names.update(enabled_custom)
     finalize_aur_repo(db, repo, builder.official, builder.keep_names, user, builder.rebuilt_files)
 
     table = Table(title="AUR Summary", box=box.ROUNDED)
@@ -1953,7 +2114,7 @@ def aur_phase(db: IsolatedDB, master: Sequence[str], repo: Path, official: Path,
     console.print(table)
     if builder.failed:
         err(f"failed: {', '.join(builder.failed)}")
-        if hard := sorted(set(builder.failed) & REQUIRED_AUR):
+        if hard := sorted(set(builder.failed) & manifests.aur_required):
             die(f"required AUR package(s) failed: {', '.join(hard)}")
 
 
@@ -1962,10 +2123,14 @@ def aur_phase(db: IsolatedDB, master: Sequence[str], repo: Path, official: Path,
 class IsoConfig:
     workspace: Path
     source_dir: Path
+    checkout: Path
     official_repo: Path
     aur_repo: Path | None
     final_dest: Path
+    manifests: PackageManifests
     rebuild_local: bool = False
+    zstd_level: int = DEFAULT_ZSTD_LEVEL
+    iso_name: str | None = None
 
     @property
     def profile_dir(self) -> Path:
@@ -1991,21 +2156,26 @@ def setup_clean_room(cfg: IsoConfig) -> None:
     remove_tree(cfg.workspace, strict=True)
     cfg.workspace.mkdir(parents=True, mode=0o700)
     shutil.copytree(RELENG, cfg.profile_dir, symlinks=True)
-    patch_profiledef_compression(cfg.profile_dir / "profiledef.sh")
+    configure_profiledef(cfg.profile_dir / "profiledef.sh", cfg.zstd_level)
     ok("clean room ready")
 
 
-def patch_profiledef_compression(profiledef: Path) -> None:
+def configure_profiledef(profiledef: Path, zstd_level: int = DEFAULT_ZSTD_LEVEL) -> None:
+    if not ZSTD_LEVEL_MIN <= zstd_level <= ZSTD_LEVEL_MAX:
+        die(f"zstd compression level must be between {ZSTD_LEVEL_MIN} and {ZSTD_LEVEL_MAX}, got {zstd_level!r}")
     if not profiledef.is_file():
-        return
+        die("profiledef.sh missing after clean room setup")
     txt = profiledef.read_text(encoding="utf-8")
-    new_opts = "airootfs_image_tool_options=('-comp' 'zstd' '-b' '1M' '-Xcompression-level' '19')"
-    new = re.sub(r"airootfs_image_tool_options=\([^)]*\)", new_opts, txt)
-    if new != txt:
-        profiledef.write_text(new, encoding="utf-8")
-        step(f"profiledef: {new_opts}")
-    else:
-        step("profiledef: compression left upstream (no airootfs_image_tool_options found)")
+    settings = {
+        "airootfs_image_tool_options": f"('-comp' 'zstd' '-b' '1M' '-Xcompression-level' '{zstd_level}')",
+        "bootmodes": "('bios.syslinux' 'uefi.grub')",
+    }
+    for name, value in settings.items():
+        txt, count = re.subn(rf"(?m)^{name}=\([^)]*\)", f"{name}={value}", txt)
+        if count != 1:
+            die(f"profiledef: expected one {name} array, found {count}; archiso profile changed")
+        step(f"profiledef: {name}={value}")
+    profiledef.write_text(txt, encoding="utf-8")
 
 
 def stage_payloads(cfg: IsoConfig) -> None:
@@ -2024,20 +2194,20 @@ def stage_payloads(cfg: IsoConfig) -> None:
     if not (dest / "000_dusky_arch_install.sh").is_file():
         die(f"expected installer missing: {dest / '000_dusky_arch_install.sh'}")
     releng_pkg = cfg.profile_dir / "packages.x86_64"
-    asset_pkg = cfg.source_dir / "assets" / "iso_temp_packages" / "packages.x86_64"
-    source = asset_pkg if asset_pkg.is_file() else releng_pkg
-    out = list(dict.fromkeys(s for ln in source.read_text(encoding="utf-8").splitlines()
-                             if (s := ln.strip()) and not s.startswith("#")))
+    aliases = cfg.manifests.iso_aliases
+    excluded = cfg.manifests.iso_exclude_live
+    out = [
+        pkg for pkg in cfg.manifests.iso_packages
+        if aliases.get(pkg, pkg) not in excluded
+    ]
     if not out:
-        die("packages.x86_64 empty")
+        die(f"packages.x86_64 empty after applying {ISO_PACKAGES_TOML} filters")
     releng_pkg.write_text("\n".join(out) + "\n", encoding="utf-8")
-    ok(f"payloads staged ({len(out)} packages.x86_64 entries)")
+    ok(f"payloads staged ({len(out)} packages.x86_64 entries from {ISO_PACKAGES_TOML})")
 
 
 def configure_live_hooks(cfg: IsoConfig) -> None:
     info("Live hooks")
-    # archiso mounts its own ISO and SquashFS. systemd's optical GPT autodiscovery
-    # otherwise tries to attach the UEFI boot medium as a root disk and fails.
     rules = cfg.profile_dir / "airootfs" / "etc" / "udev" / "rules.d"
     rules.mkdir(parents=True, exist_ok=True)
     (rules / "98-dusky-live-optical.rules").write_text(
@@ -2062,6 +2232,168 @@ def configure_live_hooks(cfg: IsoConfig) -> None:
     ok("live hooks")
 
 
+def find_local_repo() -> tuple[Path, Path] | None:
+    """Detect whether the running script lives inside a local dusky checkout or bare dotfiles worktree.
+    Returns (git_dir, work_tree) if found, or None."""
+    script_path = Path(__file__).resolve()
+    for parent in script_path.parents:
+        payload = parent / "user_scripts" / "arch_iso_scripts" / "offline_iso"
+        if not payload.is_dir():
+            continue
+        # Mode A: standard Git checkout (.git directory or file)
+        if (parent / ".git").exists():
+            return parent / ".git", parent
+        # Mode B: bare dotfiles repository at ~/dusky with worktree at ~
+        if (parent / "dusky" / "HEAD").is_file():
+            return parent / "dusky", parent
+    return None
+
+
+def _overlay_local_worktree(git_dir: Path, work_tree: Path, dest_repo: Path, git_env: dict[str, str]) -> None:
+    """Overlay modified tracked files and scoped untracked project files from work_tree into dest_repo."""
+    base_cmd = ["git", f"--git-dir={git_dir}", f"--work-tree={work_tree}"]
+    # 1. Remove tracked files deleted in the local worktree
+    deleted = run([*base_cmd, "ls-files", "-z", "--deleted"], env=git_env, capture=True)
+    if deleted.returncode == 0 and deleted.stdout:
+        for rel_str in deleted.stdout.split("\0"):
+            if rel_str:
+                (dest_repo / rel_str).unlink(missing_ok=True)
+
+    # 2. Copy modified/staged tracked files, plus untracked files strictly inside offline_iso
+    changed = run([*base_cmd, "diff", "--name-only", "-z", "HEAD"], env=git_env, capture=True)
+    untracked = run(
+        [*base_cmd, "ls-files", "-z", "--others", "--exclude-standard", "--",
+         "user_scripts/arch_iso_scripts/offline_iso"],
+        env=git_env, capture=True,
+    )
+    rel_paths: set[str] = set()
+    for res in (changed, untracked):
+        if res.returncode == 0 and res.stdout:
+            rel_paths.update(p for p in res.stdout.split("\0") if p)
+
+    work_root = work_tree.resolve()
+    dest_root = dest_repo.resolve()
+    copied = 0
+    for rel_str in sorted(rel_paths):
+        rel = Path(rel_str)
+        if rel.is_absolute() or ".." in rel.parts or "__pycache__" in rel.parts or rel.suffix == ".pyc":
+            continue
+        src = work_tree / rel
+        dst = dest_repo / rel
+        if not dst.resolve().is_relative_to(dest_root):
+            continue
+        if not src.exists() and not src.is_symlink():
+            dst.unlink(missing_ok=True)
+            continue
+        if src.is_symlink():
+            try:
+                if not src.resolve(strict=True).is_relative_to(work_root):
+                    continue
+            except OSError:
+                continue
+        if src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.unlink(missing_ok=True)
+            shutil.copy2(src, dst, follow_symlinks=True)
+            copied += 1
+    if copied:
+        step(f"synced {copied} modified/untracked local working-tree file(s) into clean-room checkout")
+
+
+def checkout_build_source(ref: str | None) -> Path:
+    """Resolve the build source into an isolated checkout; uses local repository state by default
+    when running from a local dusky checkout/worktree so active branches (e.g. future) and local
+    changes are never silently replaced by remote main."""
+    info("Resolving build source")
+    tmp = make_tempdir("dusky-dots-")
+    repo = tmp / "dusky"
+    git_env = os.environ | {
+        "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never", "GIT_ASKPASS": "/bin/true",
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*",
+        "GIT_CONFIG_KEY_1": "uploadpack.allowAnySHA1InWant", "GIT_CONFIG_VALUE_1": "true",
+    }
+    pin = (ref if ref is not None else os.environ.get("DUSKY_DOTFILES_PIN", "")).strip()
+    expect_sha = os.environ.get("DUSKY_DOTFILES_SHA", "").strip().lower()
+    is_sha = bool(re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", pin))
+    local_repo = find_local_repo()
+
+    used_local = False
+    ref_label = ""
+    if local_repo is not None:
+        git_dir, work_tree = local_repo
+        target_ref = pin or "HEAD"
+        verify = run(
+            ["git", f"--git-dir={git_dir}", "rev-parse", "--verify", "--quiet", f"{target_ref}^{{commit}}"],
+            env=git_env, capture=True,
+        )
+        if verify.returncode == 0:
+            branch_res = run(
+                ["git", f"--git-dir={git_dir}", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                env=git_env, capture=True,
+            )
+            active_branch = branch_res.stdout.strip() if branch_res.returncode == 0 else ""
+            # Use a file:// URI so Git honors --depth 1 --no-tags instead of copying all 1.9 GiB of packs
+            git_uri = git_dir.resolve().as_uri()
+            clone_cmd = ["git", "clone", "--quiet", "--depth", "1", "--no-tags", "--single-branch"]
+            if not pin and active_branch:
+                clone_cmd += ["--branch", active_branch]
+            elif pin and not is_sha:
+                clone_cmd += ["--branch", pin]
+            r = run([*clone_cmd, git_uri, repo], env=git_env, capture=True, merge=True, timeout=CLONE_TIMEOUT_S)
+            if r.returncode == 0:
+                sha_ok = True
+                if pin and is_sha:
+                    f_res = run(["git", "-C", repo, "fetch", "--quiet", "--depth", "1", "--no-tags", "origin", pin],
+                                env=git_env, capture=True, timeout=CLONE_TIMEOUT_S)
+                    c_res = (
+                        run(["git", "-C", repo, "checkout", "--quiet", "--detach", "FETCH_HEAD"],
+                            env=git_env, capture=True)
+                        if f_res.returncode == 0 else f_res
+                    )
+                    sha_ok = c_res.returncode == 0
+                if sha_ok:
+                    if not pin:
+                        _overlay_local_worktree(git_dir, work_tree, repo, git_env)
+                    used_local = True
+                    ref_label = f"local pin '{pin}'" if pin else f"local branch '{active_branch or 'HEAD'}'"
+
+    if not used_local:
+        clone_branch = pin if (pin and not is_sha) else "main"
+        detail = ""
+        for attempt in range(1, CLONE_ATTEMPTS + 1):
+            remove_tree(repo)
+            try:
+                r = run(["git", "clone", "--quiet", "--depth", "1", "--branch", clone_branch,
+                         "https://github.com/dusklinux/dusky", repo],
+                        env=git_env, capture=True, merge=True, timeout=CLONE_TIMEOUT_S)
+                if r.returncode == 0:
+                    break
+                detail = (r.stdout or "").strip()[-500:]
+            except subprocess.TimeoutExpired:
+                detail = f"timed out after {CLONE_TIMEOUT_S}s"
+            if attempt < CLONE_ATTEMPTS:
+                backoff(attempt)
+        else:
+            die(f"git clone dusky failed: {detail}")
+        if pin and is_sha:
+            run(["git", "-C", repo, "fetch", "--quiet", "--depth", "1", "origin", pin],
+                env=git_env, capture=True, check=True, timeout=CLONE_TIMEOUT_S)
+            run(["git", "-C", repo, "checkout", "--quiet", "--detach", "FETCH_HEAD"],
+                env=git_env, capture=True, check=True)
+        ref_label = f"remote pin '{pin}'" if is_sha else f"remote ref '{clone_branch}'"
+
+    head_sha = run(["git", "-C", repo, "rev-parse", "HEAD"], env=git_env,
+                   capture=True, check=True).stdout.strip().lower()
+    if expect_sha and not head_sha.startswith(expect_sha):
+        die(f"build SHA mismatch: got {head_sha}, expected {expect_sha}")
+    if head_sha:
+        step(f"build source {ref_label} (HEAD {head_sha[:12]})")
+    tmp.chmod(0o755)
+    restore_ownership(tmp, real_user())
+    return repo
+
+
 def inject_dotfiles(cfg: IsoConfig) -> None:
     info("Injecting dotfiles")
     skel = cfg.profile_dir / "airootfs" / "etc" / "skel"
@@ -2077,68 +2409,36 @@ def inject_dotfiles(cfg: IsoConfig) -> None:
         ptxt = re.sub(r"^\s*grml-zsh-config\s*$", "", pkg_file.read_text(encoding="utf-8"), flags=re.MULTILINE)
         pkg_file.write_text(ptxt, encoding="utf-8")
 
-    tmp = make_tempdir("dusky-dots-")
-    repo = tmp / "dusky"
-    git_env = os.environ | {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never", "GIT_ASKPASS": "/bin/true"}
-    try:
-        detail = ""
-        for attempt in range(1, CLONE_ATTEMPTS + 1):
-            remove_tree(repo)
+    repo = cfg.checkout
+    git_env = os.environ | {
+        "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never", "GIT_ASKPASS": "/bin/true",
+        "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*",
+    }
+    repo_real = repo.resolve()
+    for item in repo.iterdir():
+        if item.name == ".git":
+            continue
+        if item.is_symlink():
             try:
-                r = run(["git", "clone", "--quiet", "--depth", "1", "https://github.com/dusklinux/dusky", repo],
-                        env=git_env, capture=True, merge=True, timeout=CLONE_TIMEOUT_S)
-                if r.returncode == 0:
-                    break
-                detail = (r.stdout or "").strip()[-500:]
-            except subprocess.TimeoutExpired:
-                detail = f"timed out after {CLONE_TIMEOUT_S}s"
-            if attempt < CLONE_ATTEMPTS:
-                backoff(attempt)
-        else:
-            die(f"git clone dusky failed: {detail}")
-        pin = os.environ.get("DUSKY_DOTFILES_PIN", "").strip()
-        expect_sha = os.environ.get("DUSKY_DOTFILES_SHA", "").strip().lower()
-        if pin:
-            run(["git", "-C", repo, "fetch", "--quiet", "--depth", "1", "origin", pin],
-                env=git_env, capture=True, check=True, timeout=CLONE_TIMEOUT_S)
-            run(["git", "-C", repo, "checkout", "--quiet", "--detach", "FETCH_HEAD"],
-                env=git_env, capture=True, check=True)
-        head_sha = run(["git", "-C", repo, "rev-parse", "HEAD"], env=git_env,
-                       capture=True, check=True).stdout.strip().lower()
-        if expect_sha and not head_sha.startswith(expect_sha):
-            die(f"dotfiles SHA mismatch: got {head_sha}, expected {expect_sha}")
-        if head_sha:
-            step(f"dotfiles HEAD {head_sha[:12]}")
-
-        repo_real = repo.resolve()
-        for item in repo.iterdir():
-            if item.name == ".git":
-                continue
-            if item.is_symlink():  # a top-level link may point outside the checkout (host files!)
-                try:
-                    if not item.resolve(strict=True).is_relative_to(repo_real):
-                        warn(f"skipping symlink escaping the checkout: {item.name}")
-                        continue
-                except OSError:
-                    warn(f"skipping dangling symlink: {item.name}")
+                if not item.resolve(strict=True).is_relative_to(repo_real):
+                    warn(f"skipping symlink escaping the checkout: {item.name}")
                     continue
-            if item.is_dir():
-                shutil.copytree(item, skel / item.name, symlinks=False, dirs_exist_ok=True,
-                                ignore_dangling_symlinks=True)
-            else:
-                shutil.copy2(item, skel / item.name)
+            except OSError:
+                warn(f"skipping dangling symlink: {item.name}")
+                continue
+        if item.is_dir():
+            shutil.copytree(item, skel / item.name, symlinks=False, dirs_exist_ok=True,
+                            ignore_dangling_symlinks=True)
+        else:
+            shutil.copy2(item, skel / item.name)
 
-        # Keep Git metadata alongside the flattened work tree. useradd copies
-        # this into ~/dusky, so offline installations have a usable bare repo.
-        bare = skel / "dusky"
-        run(["git", "clone", "--quiet", "--bare", "--no-hardlinks", repo, bare],
-            env=git_env, capture=True, check=True)
-        run(["git", "--git-dir", bare, "remote", "set-url", "origin", "https://github.com/dusklinux/dusky"],
-            env=git_env, capture=True, check=True)
-        run(["git", "--git-dir", bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
-            env=git_env, capture=True, check=True)
-    finally:
-        remove_tree(tmp)
+    bare = skel / "dusky"
+    run(["git", "clone", "--quiet", "--bare", "--no-hardlinks", repo, bare],
+        env=git_env, capture=True, check=True)
+    run(["git", "--git-dir", bare, "remote", "set-url", "origin", "https://github.com/dusklinux/dusky"],
+        env=git_env, capture=True, check=True)
+    run(["git", "--git-dir", bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        env=git_env, capture=True, check=True)
 
     marker = "# --- AUTOMATED ISO INJECTION: EDITOR & YAZI WRAPPER ---"
     yazi_fn = (
@@ -2166,12 +2466,11 @@ def inject_dotfiles(cfg: IsoConfig) -> None:
         (skel / ".config" / "hypr").mkdir(parents=True, exist_ok=True)
         shutil.copy2(hypr_src, skel / ".config" / "hypr" / "hyprland.lua")
 
-    # mkarchiso copies airootfs with --no-preserve=mode: executables need file_permissions entries
     rootfs = cfg.profile_dir / "airootfs"
     perms: list[str] = []
-    for dirpath, _dirs, files in os.walk(skel):
+    for dirpath, _dirs, files in skel.walk():
         for name in files:
-            path = Path(dirpath, name)
+            path = dirpath / name
             st = path.lstat()
             if not path.is_symlink() and st.st_mode & 0o111:
                 rel = "/" + os.fspath(path.relative_to(rootfs))
@@ -2182,16 +2481,21 @@ def inject_dotfiles(cfg: IsoConfig) -> None:
     ok(f"dotfiles injected ({len(perms)} executable(s) registered)")
 
 
-def tree_digest(root: Path, *, permissions: bool = True) -> str:
-    """Hash the tree as copytree(symlinks=False) sees it; ignore timestamps and ownership."""
+def tree_digest(root: Path) -> str:
+    """Hash the tree as copytree(symlinks=False, ignore_dangling_symlinks=True) sees it."""
     digest = hashlib.sha256()
 
     def visit(path: Path, relative: Path, ancestors: frozenset[Path]) -> None:
-        resolved = path.resolve(strict=True)
+        if path.is_symlink():
+            try:
+                resolved = path.resolve(strict=True)
+            except OSError:
+                return
+        else:
+            resolved = path.resolve(strict=True)
         st = path.stat()
         digest.update(os.fsencode(relative) + b"\0")
-        if permissions:
-            digest.update(f"{st.st_mode & 0o7777:o}\0".encode())
+        digest.update(f"{st.st_mode & 0o7777:o}\0".encode())
         if path.is_dir():
             if resolved in ancestors:
                 die(f"cyclic source directory link: {path}")
@@ -2229,20 +2533,20 @@ def load_custom_builds(repo: Path | None) -> dict[str, dict[str, str]]:
 
 
 def build_local_packages(cfg: IsoConfig, user: RealUser) -> None:
-    """Reuse verified builds with matching inputs; build only missing or changed recipes."""
-    skel = cfg.profile_dir / "airootfs" / "etc" / "skel"
-    recipes_dir = skel / "user_scripts" / "arch_iso_scripts" / "offline_iso" / "iso_maker" / "python" / "dusky_packages_compile"
-    local_dir = cfg.source_dir / "iso_maker" / "python" / "dusky_packages_compile"
-    local_recipes = sorted(p for p in local_dir.iterdir() if p.is_dir() and (p / "recipe.toml").is_file()) \
-        if local_dir.is_dir() else []
-    recipes = sorted(p for p in recipes_dir.iterdir() if p.is_dir() and (p / "recipe.toml").is_file()) \
-        if recipes_dir.is_dir() else []
-    if [p.name for p in local_recipes] != [p.name for p in recipes]:
-        die("local package recipes differ from the injected Git checkout; commit and push the recipes")
-    for local, staged in zip(local_recipes, recipes, strict=True):
-        # Git does not preserve arbitrary local permissions or directory modes.
-        if tree_digest(local, permissions=False) != tree_digest(staged, permissions=False):
-            die(f"{local.name}: recipe files differ from the injected Git checkout; commit and push them")
+    """Build or reuse strictly the custom packages enabled in 03_dusky.toml."""
+    discovered = discover_local_recipes(cfg.source_dir)
+    enabled_names = cfg.manifests.dusky_packages
+    disabled_names = sorted(set(discovered) - set(enabled_names))
+    if disabled_names:
+        step(f"skipping {len(disabled_names)} disabled local recipe(s) (not in {DUSKY_TOML}): {', '.join(disabled_names)}")
+
+    recipes: list[RecipeSpec] = []
+    for name in enabled_names:
+        spec = discovered.get(name)
+        if spec is None:
+            die(f"{DUSKY_TOML} enables {name!r}, but no recipe exists in {cfg.source_dir / RECIPES_DIR_REL}")
+        recipes.append(spec)
+
     names: list[str] = []
     artifacts: list[tuple[str, str]] = []
     cache = load_custom_builds(cfg.aur_repo)
@@ -2255,32 +2559,62 @@ def build_local_packages(cfg: IsoConfig, user: RealUser) -> None:
             die("local ISO packages require a non-root invoking user; run via sudo from your user account")
         require_tool("makepkg", "pacman")
         require_tool("repo-add", "pacman")
-        info(f"Preparing {len(recipes)} local ISO recipe(s)")
+        info(f"Preparing {len(recipes)} local ISO recipe(s) enabled in {DUSKY_TOML}")
         config = write_factory_makepkg_conf(cfg.workspace / "local-makepkg.conf")
+    else:
+        info(f"No local ISO recipes enabled in {DUSKY_TOML}")
+
     repo = cfg.workspace / "local_repo"
-    for recipe in recipes:
-        if not (recipe / "PKGBUILD").is_file():
-            die(f"{recipe}: recipe.toml requires a PKGBUILD")
-        try:
-            spec = tomllib.loads((recipe / "recipe.toml").read_text(encoding="utf-8"))
-            name = spec["package"]
-            source_rel = Path(spec["source"])
-            tools = spec.get("tools", [])
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            die(f"{recipe}: invalid recipe.toml ({exc})")
-        if (not isinstance(name, str) or not PKGNAME_RE.fullmatch(name)
-                or name in names or not isinstance(tools, list)
-                or not all(isinstance(tool, str) and re.fullmatch(r"[A-Za-z0-9._+-]+", tool) for tool in tools)
-                or source_rel.is_absolute() or ".." in source_rel.parts):
-            die(f"{recipe}: invalid package name, tools, or source path")
-        source = (skel / source_rel).resolve()
-        if not source.is_dir() or not source.is_relative_to(skel.resolve()):
-            die(f"{recipe}: source {source_rel} is missing from the ISO dotfiles checkout")
+    recipes_dir = cfg.source_dir / RECIPES_DIR_REL
+    checkout_root = cfg.checkout.resolve()
+    skel_root = (cfg.profile_dir / "airootfs" / "etc" / "skel").resolve()
+    build_rust_path = recipes_dir / "build_rust.py"
+    rust_shared_path = (
+        checkout_root / "user_scripts" / "arch_setup_scripts" / "scripts"
+        / "147_rust_compiles_shared_NOT_STANDALONE.py"
+    )
+    rust_shared_dir = checkout_root / "user_scripts" / "rust_shared"
+    if not rust_shared_dir.is_dir():
+        rust_shared_dir = skel_root / "user_scripts" / "rust_shared"
+    rust_shared = None
+
+    for spec in recipes:
+        name = spec.package
+        recipe = spec.recipe_dir
+        source = (checkout_root / spec.source_rel).resolve()
+        if not source.is_dir() or not source.is_relative_to(checkout_root):
+            source = (skel_root / spec.source_rel).resolve()
+            if not source.is_dir() or not source.is_relative_to(skel_root):
+                die(f"{recipe}: source {spec.source_rel} is missing from checkout {checkout_root}")
+        active_lines = [
+            line.split("#", 1)[0]
+            for line in (recipe / "PKGBUILD").read_text(encoding="utf-8").splitlines()
+        ]
+        uses_build_rust = any("DUSKY_BUILD_RUST" in line for line in active_lines)
+        uses_font_files = any("font_source_files" in line for line in active_lines)
+        support_paths: set[Path] = set()
+        if uses_build_rust or uses_font_files:
+            for p in (build_rust_path, rust_shared_path):
+                if not p.is_file():
+                    die(f"{name}: required Rust build helper missing: {p}")
+            support_paths.update((build_rust_path, rust_shared_path))
+            if rust_shared_dir.is_dir():
+                support_paths.add(rust_shared_dir)
+            if rust_shared is None:
+                mod_spec = importlib.util.spec_from_file_location("dusky_rust_build_shared", rust_shared_path)
+                if mod_spec is None or mod_spec.loader is None:
+                    die(f"could not load shared Rust build helper: {rust_shared_path}")
+                rust_shared = importlib.util.module_from_spec(mod_spec)
+                sys.modules[mod_spec.name] = rust_shared
+                mod_spec.loader.exec_module(rust_shared)
+            support_paths.update(rust_shared.font_source_files())
 
         assert config is not None
         fingerprint = hashlib.sha256(
             b"dusky-local-build-v1\0" + bytes.fromhex(tree_digest(recipe))
-            + bytes.fromhex(tree_digest(source)) + config.read_bytes()
+            + bytes.fromhex(tree_digest(source))
+            + b"".join(bytes.fromhex(tree_digest(path)) for path in sorted(support_paths))
+            + config.read_bytes()
         ).hexdigest()
         fingerprints[name] = fingerprint
         record = cache.get(name, {})
@@ -2301,20 +2635,26 @@ def build_local_packages(cfg: IsoConfig, user: RealUser) -> None:
                 continue
             dest.unlink(missing_ok=True)
             warn(f"cached {name} failed verification ({problem}); rebuilding")
+
         step(f"{name}: " + ("forced rebuild" if cfg.rebuild_local else "inputs changed or no verified build cached"))
-        for tool in tools:
+        for tool in spec.tools:
             require_tool(tool, f"required by {name}")
         work = make_tempdir(f"dusky-package-{name}-", owner=user)
         shutil.copytree(source, work / "source", symlinks=False)
         shutil.copytree(recipe, work / "recipe", symlinks=False)
         for sub in ("packages", "build", "cargo-target"):
             (work / sub).mkdir()
+        if rust_shared_dir.is_dir():
+            pkg_build_dir = work / "build" / name
+            pkg_build_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(rust_shared_dir, pkg_build_dir / "rust_shared", symlinks=False)
         build_config = work / "makepkg.conf"
         shutil.copyfile(config, build_config)
         restore_ownership(work, user)
         env = makepkg_env(
             user, DUSKY_PACKAGE_SOURCE=str(work / "source"), PKGDEST=str(work / "packages"),
             BUILDDIR=str(work / "build"), CARGO_TARGET_DIR=str(work / "cargo-target"),
+            DUSKY_BUILD_RUST=str(build_rust_path),
         )
         log = work / "build.log"
         step(f"makepkg {name} (log: {log})")
@@ -2349,60 +2689,90 @@ def build_local_packages(cfg: IsoConfig, user: RealUser) -> None:
     manifest.write_text("".join(f"{name}\t{filename}\n" for name, filename in artifacts), encoding="utf-8")
     if names:
         entries = update_repo_db(repo, set(package_files(repo)), reused)
-        records = {name: {"fingerprint": fingerprints[name], "filename": entry.filename,
-                          "sha256": entry.sha256} for name, entry in entries.items()
-                   if entry.filename not in reused}
+        records = {
+            name: {"fingerprint": fingerprints[name], "filename": entry.filename, "sha256": entry.sha256}
+            for name, entry in entries.items()
+        }
         (repo / CUSTOM_BUILDS_FILE).write_text(json.dumps(records, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def publish_local_packages(cfg: IsoConfig, user: RealUser) -> None:
-    """Persist verified custom builds and their current metadata in the configured AUR repo."""
-    local = cfg.workspace / "local_repo"
-    if not (local / FILES_NAME).is_file():
-        return
+    """Persist enabled custom builds in the AUR repo and prune any custom packages disabled in 03_dusky.toml."""
     if cfg.aur_repo is None:
-        die("custom packages require an AUR repository destination")
+        if (cfg.workspace / "local_repo" / FILES_NAME).is_file():
+            die("custom packages require an AUR repository destination")
+        return
     repo = cfg.aur_repo.resolve()
     assert_conf_safe(repo)
+    local = cfg.workspace / "local_repo"
+    entries = read_repo_db(local / FILES_NAME) if (local / FILES_NAME).is_file() else {}
+    builds = load_custom_builds(local) if (local / CUSTOM_BUILDS_FILE).is_file() else {}
+
+    if not entries and not repo.is_dir():
+        return
     repo.mkdir(parents=True, exist_ok=True)
-    entries = read_repo_db(local / FILES_NAME)
     old = load_db_by_filename(repo)
-    builds = load_custom_builds(local)
     cache = load_custom_builds(repo)
-    # Fresh builds are always published, including byte-identical repairs of corrupt archives.
-    changed = [e for e in entries.values() if e.name in builds or (previous := old.get(e.filename)) is None
-               or previous.sha256 != e.sha256 or file_size(repo / e.filename) != e.csize]
-    if not changed and all(cache.get(name) == record for name, record in builds.items()):
+    prev_custom = custom_package_names(repo) | set(cache) | set(discover_local_recipes(cfg.source_dir))
+    removed_custom = prev_custom - set(entries)
+
+    def _disk_sha256(path: Path) -> str:
+        try:
+            with path.open("rb") as fh:
+                return hashlib.file_digest(fh, "sha256").hexdigest()
+        except OSError:
+            return ""
+
+    changed = [
+        e for e in entries.values()
+        if cfg.rebuild_local
+        or (previous := old.get(e.filename)) is None
+        or previous.sha256 != e.sha256
+        or file_size(repo / e.filename) != e.csize
+        or cache.get(e.name) != builds.get(e.name)
+        or _disk_sha256(repo / e.filename) != e.sha256
+    ]
+    if not changed and not removed_custom and custom_package_names(repo) == set(entries):
         step("custom package repository already current; skipping publication")
         return
+
     ensure_disk_space(repo, sum(e.csize for e in changed), "custom package publication")
-    names = custom_package_names(repo) | entries.keys()
-    # Record retention before copying so an interrupted publication cannot cause a subsequent
-    # AUR-only run to prune an already published custom build.
     with atomic_path(repo / CUSTOM_PACKAGES_FILE) as tmp:
-        tmp.write_text("".join(f"{name}\n" for name in sorted(names)), encoding="utf-8")
+        tmp.write_text("".join(f"{name}\n" for name in sorted(entries)), encoding="utf-8")
     fsync_dir(repo)
+
     for entry in changed:
         with atomic_path(repo / entry.filename) as tmp:
             shutil.copyfile(local / entry.filename, tmp)
-        # These builds are unsigned; an old detached signature must not survive replacement.
         (repo / f"{entry.filename}.sig").unlink(missing_ok=True)
-        old[entry.filename] = entry  # fresh metadata, even for equal-sized same-version rebuilds
-    winners = newest_files(package_files(repo), versions={fn: e.version for fn, e in old.items()})
+        old[entry.filename] = entry
+
+    winners = {
+        name: fn for name, fn in newest_files(
+            package_files(repo), versions={fn: e.version for fn, e in old.items()}
+        ).items()
+        if name not in removed_custom
+    }
     winners.update((name, e.filename) for name, e in entries.items())
-    update_repo_db(repo, set(winners.values()), old, force_write=True)
-    # Remove only superseded custom versions, after the new index is durable.
+    if winners:
+        update_repo_db(repo, set(winners.values()), old, force_write=True)
+    else:
+        for db_file in (DB_NAME, FILES_NAME, f"{REPO_NAME}.db", f"{REPO_NAME}.files"):
+            (repo / db_file).unlink(missing_ok=True)
+
     for fn in package_files(repo):
-        if (parsed := parse_pkg_filename(fn)) is not None and parsed[0] in entries and fn != winners[parsed[0]]:
-            (repo / fn).unlink()
-            (repo / f"{fn}.sig").unlink(missing_ok=True)
-    # Commit provenance only after the archives and repository index are durable.
-    cache.update(builds)
+        if (parsed := parse_pkg_filename(fn)) is not None:
+            pkg_name = parsed[0]
+            if pkg_name in removed_custom or (pkg_name in entries and fn != winners.get(pkg_name)):
+                (repo / fn).unlink(missing_ok=True)
+                (repo / f"{fn}.sig").unlink(missing_ok=True)
+
     with atomic_path(repo / CUSTOM_BUILDS_FILE) as tmp:
-        tmp.write_text(json.dumps(cache, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(builds, sort_keys=True) + "\n", encoding="utf-8")
     fsync_dir(repo)
     restore_ownership(repo, user)
-    ok(f"published {len(changed)} custom package(s) to {repo}")
+    ok(f"published {len(changed)} custom package(s) to {repo}"
+       + (f" (pruned {len(removed_custom)} disabled)" if removed_custom else ""))
 
 
 _copy_buf = threading.local()
@@ -2449,16 +2819,18 @@ def stage_iso_repo(cfg: IsoConfig) -> dict[str, DbEntry]:
         n: (e, cfg.official_repo) for n, e in read_repo_db(cfg.official_repo / FILES_NAME).items()}
     local_repo = cfg.workspace / "local_repo"
     local_entries = read_repo_db(local_repo / FILES_NAME) if (local_repo / FILES_NAME).is_file() else {}
-    custom_names = custom_package_names(cfg.aur_repo) if cfg.aur_repo is not None else set()
+    custom_names = (
+        (custom_package_names(cfg.aur_repo) if cfg.aur_repo is not None else set())
+        | set(cfg.manifests.dusky_packages)
+        | set(discover_local_recipes(cfg.source_dir))
+    )
     if cfg.aur_repo is not None:
-        # Local recipes have already repaired their own archives in the workspace.
-        # Do not parse a broken persistent custom archive before its replacement is
-        # dependency-checked; publication follows the verified merged staging step.
-        excluded = custom_names & local_entries.keys()
+        # Exclude all known custom packages when reading aur_repo so only the enabled
+        # recipes built/reused in local_repo are staged into the ISO.
         aur_metadata = load_db_by_filename(cfg.aur_repo)
         wanted = {fn for name, fn in newest_files(
             package_files(cfg.aur_repo), versions={fn: e.version for fn, e in aur_metadata.items()}
-        ).items() if name not in excluded}
+        ).items() if name not in custom_names}
         aur_entries = update_repo_db(cfg.aur_repo, wanted, aur_metadata, persist=False)
         for name, entry in aur_entries.items():
             cur = merged.get(name)
@@ -2467,7 +2839,7 @@ def stage_iso_repo(cfg: IsoConfig) -> dict[str, DbEntry]:
                     warn(f"{name}: AUR repo {entry.version} supersedes official {cur[0].version}")
                 merged[name] = (entry, cfg.aur_repo)
     for name, entry in local_entries.items():
-        if name in merged and (name not in custom_names or merged[name][1] != cfg.aur_repo):
+        if name in merged:
             die(f"local ISO package {name} conflicts with an official or AUR package")
         merged[name] = (entry, local_repo)
     if not merged:
@@ -2574,7 +2946,7 @@ def sanitize_live_packages(cfg: IsoConfig, entries: dict[str, DbEntry]) -> None:
         pkg = line.strip()
         if not pkg or pkg.startswith("#"):
             continue
-        if (target := LIVE_PKG_ALIASES.get(pkg)) is not None and target in universe:
+        if (target := cfg.manifests.iso_aliases.get(pkg)) is not None and target in universe:
             step(f"mapped obsolete live package {pkg} -> {target}")
             pkg = target
         if pkg not in universe:
@@ -2598,12 +2970,20 @@ def build_iso_image(cfg: IsoConfig, user: RealUser) -> tuple[Path, str]:
     info("Building ISO")
     require_tool("mkarchiso", "archiso")
     mk_text = Path(shutil.which("mkarchiso")).read_text(encoding="utf-8")
-    marker = "_build_iso_image() {"
-    if (count := mk_text.count(marker)) != 1:
-        die(f"mkarchiso: expected exactly one {marker!r}, found {count}; archiso layout changed")
     mk = cfg.workspace / "mkarchiso"
     hook = MKARCHISO_HOOK.replace("@STAGING@", shlex.quote(os.fspath(cfg.staging)))
-    mk.write_text(mk_text.replace(marker, f"{marker}\n{hook}", 1), encoding="utf-8")
+    for marker, body in (("_build_iso_image() {", hook),
+                         ("_cleanup_pacstrap_dir() {", MKARCHISO_CLEANUP_HOOK)):
+        if (count := mk_text.count(marker)) != 1:
+            die(f"mkarchiso: expected exactly one {marker!r}, found {count}; archiso layout changed")
+        mk_text = mk_text.replace(marker, f"{marker}\n{body}", 1)
+    # Compress GRUB's embedded files without omitting any boot-loader modules or fonts.
+    # The live filesystem keeps its configurable Zstd compression setting (default level 3).
+    grub_call = "grub-mkstandalone -O"
+    if mk_text.count(grub_call) != 2:
+        die("mkarchiso: expected x64 and IA32 GRUB build commands; archiso layout changed")
+    mk_text = mk_text.replace(grub_call, "grub-mkstandalone --compress=xz -O")
+    mk.write_text(mk_text, encoding="utf-8")
     mk.chmod(0o755)
 
     cmd = [mk, "-v", "-r", "-m", "iso", "-w", cfg.work_dir, "-o", cfg.out_dir, cfg.profile_dir]
@@ -2615,7 +2995,8 @@ def build_iso_image(cfg: IsoConfig, user: RealUser) -> tuple[Path, str]:
         die("mkarchiso produced no ISO")
 
     cfg.final_dest.mkdir(parents=True, exist_ok=True)
-    final = cfg.final_dest / f"dusky_{datetime.now():%m_%y}.iso"
+    raw_name = validate_iso_name(cfg.iso_name) if cfg.iso_name is not None else f"dusky_{datetime.now():%m_%y}.iso"
+    final = cfg.final_dest / (raw_name if raw_name.endswith(".iso") else f"{raw_name}.iso")
     sha_path = final.with_name(f"{final.stem}_iso.sha256")
     with atomic_path(final) as tmp_iso:  # previous ISO survives until the new one is complete
         shutil.move(isos[0], tmp_iso)  # rename(2) when the workspace shares the filesystem
@@ -2627,20 +3008,26 @@ def build_iso_image(cfg: IsoConfig, user: RealUser) -> tuple[Path, str]:
     fsync_dir(cfg.final_dest)
     for path in (final, sha_path):
         os.chown(path, user.uid, user.gid)
-    for old in cfg.final_dest.glob("dusky_*"):  # only now that the replacement is durable
-        if old not in (final, sha_path) and old.is_file() and old.name.endswith((".iso", "_iso.sha256")):
-            step(f"removing previous build artifact: {old.name}")
-            old.unlink(missing_ok=True)
+    if cfg.iso_name is None:
+        for old in cfg.final_dest.glob("dusky_*"):  # only now that the replacement is durable
+            if old not in (final, sha_path) and old.is_file() and old.name.endswith((".iso", "_iso.sha256")):
+                step(f"removing previous build artifact: {old.name}")
+                old.unlink(missing_ok=True)
     ok(f"ISO built: {final} ({human_bytes(final.stat().st_size)})")
     return final, digest
 
 
 def iso_phase(cfg: IsoConfig, user: RealUser) -> tuple[Path, str]:
     info("=== ISO BUILD ===")
-    for tool in ("mkarchiso", "git"):
+    if cfg.iso_name is not None:
+        try:
+            validate_iso_name(cfg.iso_name)
+        except ValueError as exc:
+            die(str(exc))
+    for tool in ("mkarchiso", "git", "grub-mkstandalone"):
         require_tool(tool)
     workspace = cfg.workspace.resolve()
-    for path in (cfg.source_dir, cfg.official_repo, cfg.aur_repo, cfg.final_dest):
+    for path in (cfg.source_dir, cfg.checkout, cfg.official_repo, cfg.aur_repo, cfg.final_dest):
         if path is not None and path.resolve().is_relative_to(workspace):
             die(f"ISO workspace would delete an input or output directory: {path}")
     if workspace.is_relative_to(cfg.source_dir.resolve()):
@@ -2688,6 +3075,33 @@ def prompt_path(msg: str, default: Path) -> Path:
     return Path(Prompt.ask("Path", default=str(default))).expanduser().resolve()
 
 
+def prompt_zstd_level(default: int = DEFAULT_ZSTD_LEVEL) -> int:
+    console.print(
+        f"[cyan]SquashFS Zstd compression level ({ZSTD_LEVEL_MIN}-{ZSTD_LEVEL_MAX})[/] "
+        f"(default: [bold]{default}[/] — balanced speed/ratio)"
+    )
+    while True:
+        raw = Prompt.ask("Level", default=str(default)).strip()
+        if not raw:
+            return default
+        if (level := parse_zstd_level(raw)) is not None:
+            return level
+        err(f"Invalid Zstd level {raw!r}: enter an integer between {ZSTD_LEVEL_MIN} and {ZSTD_LEVEL_MAX}.")
+
+
+def resolve_zstd_level(cli_level: int | None, *, interactive: bool) -> int:
+    if cli_level is not None:
+        return cli_level
+    raw_env = os.environ.get("DUSKY_ZSTD_LEVEL", "").strip()
+    if raw_env:
+        if (default := parse_zstd_level(raw_env)) is None:
+            die(f"invalid DUSKY_ZSTD_LEVEL={raw_env!r}: must be an integer between "
+                f"{ZSTD_LEVEL_MIN} and {ZSTD_LEVEL_MAX}")
+    else:
+        default = DEFAULT_ZSTD_LEVEL
+    return prompt_zstd_level(default) if interactive else default
+
+
 # ═══════════════════════════════════ main ═══════════════════════════════════
 def main(args: argparse.Namespace) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -2708,36 +3122,48 @@ def main(args: argparse.Namespace) -> None:
 
     official_repo = (args.official_repo or DEFAULT_OFFICIAL).expanduser()
     aur_repo = (args.aur_repo or DEFAULT_AUR).expanduser()
-    source_dir = (args.source_dir or user.home / "user_scripts" / "arch_iso_scripts" / "offline_iso").expanduser()
     if interactive and do_official:
         official_repo = prompt_path("Official repo path", official_repo)
     if interactive and do_aur:
         aur_repo = prompt_path("AUR repo path", aur_repo)
-    official_repo, aur_repo, source_dir = (p.resolve() for p in (official_repo, aur_repo, source_dir))
+    official_repo, aur_repo = (p.resolve() for p in (official_repo, aur_repo))
 
     if official_repo == aur_repo:
         die("official and AUR repositories must use different directories (their pruning rules differ)")
 
     zram = ZRAM_CANDIDATE.is_mount()
     workspace_base: Path | None = args.workspace
-    if do_iso and workspace_base is None:
-        use_zram = zram and (not interactive or Confirm.ask(
-            f"Detected {ZRAM_CANDIDATE} mounted — use it for the workspace?", default=True))
-        workspace_base = ZRAM_CANDIDATE if use_zram else Path("/tmp")
+    zstd_level = DEFAULT_ZSTD_LEVEL
+    if do_iso:
+        if workspace_base is None:
+            use_zram = zram and (not interactive or Confirm.ask(
+                f"Detected {ZRAM_CANDIDATE} mounted — use it for the workspace?", default=True))
+            workspace_base = ZRAM_CANDIDATE if use_zram else Path("/tmp")
+        zstd_level = resolve_zstd_level(args.zstd_level, interactive=interactive)
+        step(f"squashfs zstd compression level: {zstd_level}")
 
     start = time.monotonic()
+    checkout = checkout_build_source(args.ref)
+    source_dir = (args.source_dir.expanduser().resolve() if args.source_dir is not None
+                  else checkout / "user_scripts" / "arch_iso_scripts" / "offline_iso")
+    if not source_dir.is_dir():
+        die(f"installer payload directory missing: {source_dir}")
+    step(f"installer payload: {source_dir}")
+    manifests = load_package_manifests(source_dir)
+    ok(f"loaded package manifests from {source_dir / PACKAGE_LIST_REL}")
+    if do_iso and manifests.dusky_packages and user.is_root:
+        die("local ISO packages require a non-root invoking user; run via sudo from your user account")
     iso: tuple[Path, str] | None = None
     db: IsolatedDB | None = None
     try:
         if do_official or do_aur:
-            external = source_dir / "assets" / "iso_temp_packages" / "packages.x86_64"
-            master = list(dict.fromkeys([*build_master_list(external), *installer_package_targets(source_dir)]))
+            master = build_master_list(source_dir, manifests)
             db = IsolatedDB()
             db.setup()
             if do_official:
-                official_phase(db, master, official_repo, user)
+                official_phase(db, master, manifests, official_repo, user)
             if do_aur:
-                aur_phase(db, master, aur_repo, official_repo, user)
+                aur_phase(db, master, manifests, aur_repo, official_repo, user)
     finally:
         if db is not None:
             db.close()
@@ -2746,9 +3172,13 @@ def main(args: argparse.Namespace) -> None:
         cfg = IsoConfig(
             workspace=workspace_base.expanduser().resolve() / "dusky_iso",
             source_dir=source_dir,
+            checkout=checkout,
             official_repo=official_repo,
             aur_repo=aur_repo,
+            manifests=manifests,
             rebuild_local=args.rebuild_local,
+            zstd_level=zstd_level,
+            iso_name=args.iso_name,
             final_dest=(args.output_dir or (ZRAM_CANDIDATE if zram else user.home / "dusky_isos"))
                        .expanduser().resolve(),
         )

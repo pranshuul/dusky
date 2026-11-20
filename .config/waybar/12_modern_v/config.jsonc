@@ -14,16 +14,16 @@
     // ===================================================================
     // MODULE LAYOUT
     // ===================================================================
-    "modules-left": [ 
-        "group/clock-drawer", 
+    "modules-left": [
+        "group/clock-drawer",
         "group/stats"
     ],
-    
-    "modules-center": [ 
-        "hyprland/workspaces" 
+
+    "modules-center": [
+        "hyprland/workspaces"
     ],
-    
-    "modules-right": [ 
+
+    "modules-right": [
         "group/audio-drawer",
         "battery",
         "group/power-drawer"
@@ -76,9 +76,9 @@
     },
 
     "hyprland/workspaces": {
-        "format": "{name}",
+        "format": "{id}",
         "on-click": "activate",
-        "sort-by": "number",
+        "sort-by": "default",
         "persistent-workspaces": {},
         "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'",
         "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'"
@@ -86,11 +86,12 @@
 
     "group/stats": {
         "orientation": "vertical",
-        "modules": [ "cpu", "memory", "temperature" ]
+        "modules": [ "cpu", "memory", "custom/temperature" ]
     },
 
     "cpu": {
         "justify": "center",
+        "align": 0.5,
         "format": "\n{usage}",
         "interval": 2,
         "on-click": "dusky-run kitty --class htop -e htop",
@@ -102,6 +103,7 @@
 
     "memory": {
         "justify": "center",
+        "align": 0.5,
         "format": "\n{percentage}",
         "interval": 2,
         "on-click": "dusky-run kitty --class dusky_disk_monitor_io.py -e $HOME/user_scripts/drives/dusky_disk_monitor_io.py",
@@ -111,17 +113,21 @@
         }
     },
 
-    "temperature": {
+    "custom/temperature": {
         "justify": "center",
-        "thermal-zone": 6,
-        "format": "\n{temperatureC}",
-        "critical-threshold": 80,
-        "format-critical": "🔥\n{temperatureC}",
-        "tooltip": false
+        "align": 0.5,
+        "tooltip": false,
+        "exec": "\"$HOME/user_scripts/waybar/temperature.sh\" 10 80",
+        "return-type": "json",
+        "format": "{icon}\n{text}",
+        "format-icons": { "default": "", "critical": "🔥" },
+        "hide-empty-text": true,
+        "restart-interval": 5
     },
 
     "clock": {
         "justify": "center",
+        "align": 0.5,
         "format": "{:%I\n%M}",
         "tooltip-format": "<tt>{calendar}</tt>",
         "interval": 60,
@@ -132,7 +138,6 @@
             "mode-mon-col": 3,
             "weeks-pos": "right",
             "on-scroll": 1,
-            "on-click-right": "mode",
             "format": {
                 "months": "<span color='#ffead3'><b>{}</b></span>",
                 "days": "<span color='#ecc6d9'><b>{}</b></span>",
@@ -151,10 +156,10 @@
     "custom/notification": {
         "justify": "center",
         "align": 0.5,
-        "tooltip-format": "Left Click: Launch Mako\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
+        "tooltip-format": "{tooltip}\n\nLeft Click: Launch Mako\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
         "format": "{}",
         "return-type": "json",
-        "exec-if": "which makoctl",
+        "exec-if": "command -v makoctl >/dev/null 2>&1",
         "exec": "~/user_scripts/waybar/mako.sh --vertical",
         "interval": 2,
         "on-click": "~/user_scripts/rofi/rofi_mako.sh",
@@ -180,30 +185,30 @@
         "format": "{icon}\n{volume}",
         "format-muted": "󰖁",
         "on-click": "dusky-run pavucontrol",
-        "on-click-right": "dusky-run \"$HOME/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py\"",
+        "on-click-right": "\"$HOME/.local/bin/dusky_tray\"",
         "on-click-middle": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
         "on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
         "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%",
         "format-icons": ["󰖁", "", ""],
-        "tooltip-format": "Volume: {volume}%\nLMB: pavucontrol\nRMB: Quick Panel\nMMB: Mute"
+        "tooltip-format": "Volume: {volume}%\nLMB: pavucontrol\nRMB: Dusky Tray\nMMB: Mute"
     },
 
     "backlight": {
         "justify": "center",
-        "device": "intel_backlight",
+        "align": 0.5,
         "format": "{icon}\n{percent}",
         "format-icons": ["","","","","","","","","","","","","","",""],
         "tooltip": true,
         "tooltip-format": "Brightness: {percent}%",
-        "on-click": "dusky-run \"$HOME/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py\"",
+        "on-click": "\"$HOME/.local/bin/dusky_tray\"",
         "on-scroll-up": "brightnessctl set +5%",
         "on-scroll-down": "brightnessctl set 5%-",
-        "min-length": 4,
         "interval": 60
     },
 
     "bluetooth": {
         "justify": "center",
+        "align": 0.5,
         "format": "",
         "format-disabled": "󰂲",
         "format-connected": "\n{num_connections}",
@@ -214,9 +219,10 @@
 
     "custom/network": {
         "justify": "center",
+        "align": 0.5,
         "return-type": "json",
-        "exec": "$HOME/user_scripts/waybar/network/network_meter_calling.sh vertical",
-        "interval": 1, 
+        "exec": "$HOME/.local/bin/dusky_network watch --vertical",
+        "restart-interval": 3,
         "on-click": "foot --app-id=dusky_tui python $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/network_manager/tui_dusky_network.py",
         "on-click-right": "nmcli radio wifi on",
         "on-click-middle": "nmcli radio wifi off"
@@ -224,6 +230,7 @@
 
     "battery": {
         "justify": "center",
+        "align": 0.5,
         "format": "{icon}\n{capacity}",
         "format-charging": "\n{capacity}",
         "format-icons": ["󰂎", "󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"],
@@ -233,11 +240,12 @@
 
     "custom/power": {
         "justify": "center",
+        "align": 0.5,
         "format": "",
         "tooltip": true,
-        "tooltip-format": "Power Menu\nRMB - Control Center",
+        "tooltip-format": "Power Menu\nLMB: Power Menu\nRMB: Dusky Center",
         "on-click": "dusky-run ~/user_scripts/wlogout/wlogout_scale.sh",
-        "on-click-right": "dusky-run python3 ~/user_scripts/dusky_system/control_center/dusky_control_center.py"
+        "on-click-right": "\"$HOME/.local/bin/dusky_center\""
     },
 
     "custom/inhibit-suspend": {

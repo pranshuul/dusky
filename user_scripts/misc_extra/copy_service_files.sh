@@ -36,17 +36,13 @@ readonly SERVICES_CONFIG=(
 
     # Add your own paths below...
 
-    # Dusky Control Center Daemon (Default: Disable)
-#    "$HOME/user_scripts/dusky_system/control_center/service/dusky.service | disable"
-
     # dusky update checker
     "$HOME/user_scripts/update_dusky/update_checker/service/update_checker.service | disable"
     "$HOME/user_scripts/update_dusky/update_checker/service/update_checker.timer | disable"
-    "$HOME/user_scripts/dusky_system/quickpanal/service/dusky_quickpanal.service | disable"
 
 
-    # dusky osd
-    "$HOME/user_scripts/mako_osd/osd_router/osd_lock.service | disable"
+    # Lock-key and firmware-controlled keyboard-backlight OSD
+    "$HOME/user_scripts/mako_osd/osd_router/osd_lock.service | enable"
     
     # dusky audio visualizer
     "$HOME/user_scripts/way_layers/visualizer/dusky_visualizer.service | disable"

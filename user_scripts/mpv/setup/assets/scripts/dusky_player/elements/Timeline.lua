@@ -19,6 +19,7 @@ function Timeline:init()
 	self.is_hovered = false
 	self.has_thumbnail = false
 	self.heatmap = nil
+	self.waveform = require('lib/waveform').new(self)
 
 	self:decide_progress_size()
 	self:update_dimensions()
@@ -129,7 +130,7 @@ end
 
 function Timeline:clear_thumbnail()
 	if self.has_thumbnail then
-		mp.commandv('script-message-to', 'dusky_thumbnails', 'clear')
+		mp.set_property_native('user-data/osc/draw-preview', nil)
 		self.has_thumbnail = false
 	end
 end
@@ -151,6 +152,16 @@ function Timeline:on_display() self:update_dimensions() end
 function Timeline:on_options()
 	self:decide_progress_size()
 	self:update_dimensions()
+	self.waveform:update()
+end
+
+function Timeline:toggle_waveform()
+	options.timeline_waveform = not options.timeline_waveform
+	self.waveform:update()
+	local suffix = self.waveform.worker and ' (analysing...)'
+		or (not self.waveform.data and ' (requires a local audio file)') or ''
+	mp.osd_message(options.timeline_waveform and ('Audio waveform: on' .. suffix) or 'Audio waveform: off')
+	self:flash()
 end
 function Timeline:handle_cursor_up()
 	if self.pressed then
@@ -304,6 +315,9 @@ function Timeline:render()
 		draw_heatmap()
 	end
 
+	-- Whole-track audio envelope behind timestamps and chapter markers.
+	self.waveform:render(ass, bax, fay, bbx, fby, visibility, line_width, is_line and fax, fbx)
+
 	-- Flat cache shading replaces the bundled texture font.
 	if options.timeline_cache and state.uncached_ranges then
 		for _, range in ipairs(state.uncached_ranges) do
@@ -318,7 +332,9 @@ function Timeline:render()
 		local rax = chapter_range.start < 0.1 and bax or t2x(chapter_range.start)
 		local rbx = chapter_range['end'] > state.duration - 0.1 and bbx
 			or t2x(math.min(chapter_range['end'], state.duration))
-		ass:rect(rax, fay, rbx, fby, {color = chapter_range.color, opacity = chapter_range.opacity})
+		ass:rect(rax, fay, rbx, fby, {
+			color = config.color[chapter_range.theme_color] or chapter_range.color, opacity = chapter_range.opacity,
+		})
 	end
 
 	-- Chapters
@@ -494,7 +510,13 @@ function Timeline:render()
 			})
 			local thumb_seconds = (state.rebase_start_time == false and state.start_time) and
 				(hovered_seconds - state.start_time) or hovered_seconds
-			mp.commandv('script-message-to', 'dusky_thumbnails', 'thumb', thumb_seconds, thumb_x, thumb_y)
+			mp.set_property_native('user-data/osc/draw-preview', {
+				x = thumb_x,
+				y = thumb_y,
+				w = thumb_width,
+				h = thumb_height,
+				['hover-sec'] = thumb_seconds,
+			})
 			self.has_thumbnail, rendered_thumbnail = true, true
 			tooltip_anchor.ay = ay
 		end

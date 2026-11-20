@@ -1,3 +1,3 @@
-"""Dusky Keylogger -- always-on keystroke statistics daemon."""
+"""Dusky Keylogger -- opt-in keystroke statistics."""
 
 __version__ = "2.0.0"

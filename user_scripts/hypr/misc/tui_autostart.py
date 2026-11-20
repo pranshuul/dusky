@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import sys
 from pathlib import Path
 
@@ -12,15 +13,16 @@ from python.frontend.core_types import ConfigItem
 # =============================================================================
 # 1. CORE APPLICATION ROUTING
 # =============================================================================
+_config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 ENGINE_TYPE = "autostart"
-TARGET_FILE = "~/.config/hypr/edit_here/source/autostart.lua"
+TARGET_FILE = str(_config_home / "hypr/edit_here/source/autostart.lua")
 APP_TITLE = "Autostart & Services"
 
 # =============================================================================
 # 2. UI & ENVIRONMENT BEHAVIOR
 # =============================================================================
 DEFAULT_MODE = "auto"
-THEME_FILE = "~/.config/matugen/generated/dusky_tui.json"
+THEME_FILE = str(_config_home / "matugen/generated/dusky_tui.json")
 ENABLE_USER_PRESETS = True
 USER_PRESETS_TAB = "Profiles"
 
@@ -59,7 +61,7 @@ TABS = [
     "Profiles"
 ]
 
-DUSKY_SYSTEM_TARGET = "~/.config/hypr/source/autostart.lua"
+DUSKY_SYSTEM_TARGET = str(_config_home / "hypr/source/autostart.lua")
 DUSKY_DISCLAIMER = "Core system autostart configuration. Do not modify unless you know what you are doing."
 
 # =============================================================================
@@ -297,6 +299,16 @@ SCHEMA = {
             extended_help="**CPU Power Glance Autostart**\n\nLaunches CPU power consumption overlay at startup."
         ),
         ConfigItem(
+            label="CPU Frequency",
+            key="glance_cpu_freq",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**CPU Frequency Glance Autostart**\n\nLaunches CPU core frequency overlay at startup."
+        ),
+        ConfigItem(
             label="Memory (RAM)",
             key="glance_ram",
             scope="autostart",
@@ -305,6 +317,36 @@ SCHEMA = {
             parent_ref="menu_dusky_glance",
             group="Dashboards",
             extended_help="**RAM Glance Autostart**\n\nLaunches RAM usage overlay at startup."
+        ),
+        ConfigItem(
+            label="RAM Available (Headroom)",
+            key="glance_ram_available",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**RAM Available Glance Autostart**\n\nLaunches available memory headroom overlay at startup."
+        ),
+        ConfigItem(
+            label="RAM Free (Unallocated)",
+            key="glance_ram_free",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**RAM Free Glance Autostart**\n\nLaunches unallocated memory overlay at startup."
+        ),
+        ConfigItem(
+            label="RAM Dirty Cache",
+            key="glance_ram_dirty",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**RAM Dirty Cache Glance Autostart**\n\nLaunches memory dirty writeback cache overlay at startup."
         ),
         ConfigItem(
             label="RAM Temperature",
@@ -515,6 +557,16 @@ SCHEMA = {
             parent_ref="menu_dusky_glance",
             group="Dashboards",
             extended_help="**Uptime Glance Autostart**\n\nLaunches system uptime overlay at startup."
+        ),
+        ConfigItem(
+            label="System Load",
+            key="glance_load",
+            scope="autostart",
+            type_="bool",
+            default=False,
+            parent_ref="menu_dusky_glance",
+            group="Dashboards",
+            extended_help="**System Load Glance Autostart**\n\nLaunches system load average overlay at startup."
         ),
         ConfigItem(
             label="Workspace Overview",
@@ -753,6 +805,7 @@ SCHEMA = {
             type_="preset",
             default=None,
             group="Optimization",
+            preset_partial=True,
             preset_payload={
                 "xwayland.enabled": False,
                 "autostart.audio_visualizer": False

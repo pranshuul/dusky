@@ -5,7 +5,7 @@
 		"custom/right_div#1",
 		"hyprland/workspaces",
 		"custom/notifications",
-		"custom/right_div#1"
+		"custom/right_div#6"
 	],
 	"modules-center": [
 		"custom/left_div#2",
@@ -13,7 +13,7 @@
 		"custom/left_div#3",
 		"memory",
 		"custom/left_div#4",
-		"cpu",
+		"group/cpu-drawer",
 		"custom/left_inv#1",
 		"custom/left_div#5",
 		"custom/distro",
@@ -30,13 +30,15 @@
 		"custom/right_div#5"
 	],
 	"modules-right": [
-		"custom/left_div#2",
-		"group/pulseaudio",
-		"custom/left_div#3",
-		"custom/left_div#4",
-		"group/backlight-drawer",
-		"group/power-drawer"
-	],
+    "custom/left_div#6",
+    "group/pulseaudio",
+    "custom/left_div#7",
+    "backlight",
+    "custom/left_div#8",
+    "battery",
+    "custom/left_inv#2",
+    "group/power-drawer"
+],
 
 	"layer": "top",
 	"tooltip": true,
@@ -44,7 +46,6 @@
 	"width": 0,
 	"margin": 0,
 	"spacing": 0,
-	"mode": "dock",
 	"reload_style_on_change": true,
 
 	"group/user": {
@@ -74,11 +75,7 @@
 	},
 
 	"hyprland/workspaces": {
-		"format": "{icon}",
-		"format-icons": {
-			"active": "",
-			"default": ""
-		},
+		"format": "{id}",
 		"on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'",
 		"on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'",
 		"cursor": true
@@ -98,16 +95,16 @@
 		"on-click-right": "nmcli radio wifi off && notify-send 'Turned OFF WiFi'",
 		"tooltip-format": "<b>Gateway</b>: {gwaddr}",
 		"tooltip-format-ethernet": "<b>Interface</b>: {ifname}",
-		"tooltip-format-wifi": "<b>Network</b>: {essid}\n<b>IP Addr</b>: {ipaddr}/{cidr}\n<b>Strength</b>: {signalStrength}%\n<b>Frequency</b>: {frequency} GHz\n<b>Up</b>: {bandwidthUpBytes}  <b>Down</b>: {bandwidthDownBytes}",
+		"tooltip-format-wifi": "<b>Network</b>: {essid}\n<b>IP Addr</b>: {ipaddr}/{cidr}\n<b>Strength</b>: {signalStrength}%\n<b>Frequency</b>: {frequency} GHz",
 		"tooltip-format-disconnected": "Wi-Fi Disconnected",
 		"tooltip-format-disabled": "Wi-Fi Disabled"
 	},
 
 	"custom/net-speed": {
-		"exec": "$HOME/user_scripts/waybar/network/network_meter_calling.sh --horizontal",
+		"exec": "$HOME/.local/bin/dusky_network watch --horizontal",
 		"return-type": "json",
 		"format": "{}",
-		"interval": 1,
+		"restart-interval": 3,
 		"tooltip": true
 	},
 
@@ -134,12 +131,25 @@
 		"format": "󰘚 {percentage}%",
 		"format-warning": "󰀧 {percentage}%",
 		"format-critical": "󰀧 {percentage}%",
-    "on-click": "dusky-run kitty --class dusky_disk_monitor_io -e python \"$HOME/user_scripts/drives/dusky_disk_monitor_io.py\"",
+		"on-click": "dusky-run kitty --class dusky_disk_monitor_io -e python \"$HOME/user_scripts/drives/dusky_disk_monitor_io.py\"",
 		"states": {
 			"warning": 75,
 			"critical": 90
 		},
-		"tooltip-format": "Memory Used: {used:0.0f}/{total:0.0f} GB"
+		"tooltip-format": "Memory Used: {used:0.0f}/{total:0.0f} GiB"
+	},
+
+	"group/cpu-drawer": {
+		"orientation": "horizontal",
+		"drawer": {
+			"transition-duration": 300,
+			"children-class": "cpu-drawer-child",
+			"transition-left-to-right": false
+		},
+		"modules": [
+			"cpu",
+			"temperature"
+		]
 	},
 
 	"cpu": {
@@ -154,16 +164,28 @@
 		"tooltip": false
 	},
 
+	"temperature": {
+		"thermal-zone": 1,
+		"interval": 10,
+		"format": "{icon} {temperatureC}°C",
+		"format-icons": [
+			"󱃃", "󰔏", "󱃂"
+		],
+		"critical-threshold": 90,
+		"format-critical": "󰀦 {temperatureC}°C",
+		"tooltip-format": "In Fahrenheit: {temperatureF}°F"
+	},
+
 	"custom/distro": {
 		"format": "󰌽",
-		"on-click": "gdbus call --session --dest com.github.dusky.controlcenter --object-path /com/github/dusky/controlcenter --method org.freedesktop.Application.Activate '{}'",
-		"on-click-right": "gdbus call --session --dest org.dusky.quickpanal --object-path /org/dusky/quickpanal --method org.freedesktop.Application.Activate '{}'",
-		"tooltip-format": "Control Center"
+		"on-click": "\"$HOME/.local/bin/dusky_center\"",
+		"on-click-right": "\"$HOME/.local/bin/dusky_tray\"",
+		"tooltip-format": "LMB: Dusky Center\nRMB: Dusky Tray"
 	},
 
 	"clock#time": {
 		"format": "{:%H:%M}",
-		"tooltip-format": "<b>Standard Time</b>: {:%H:%M}"
+		"tooltip-format": "<b>Standard Time</b>: <span text_transform='lowercase'>{:%I:%M %p}</span>"
 	},
 
 	"clock#date": {
@@ -191,8 +213,8 @@
 
 	"custom/weather": {
 		"format": "{}",
-		"exec": "python3 ~/user_scripts/waybar/weather.py",
-		"interval": 1800,
+		"exec": "python3 \"$HOME/user_scripts/waybar/weather.py\"",
+		"interval": 600,
 		"return-type": "json"
 	},
 
@@ -240,11 +262,10 @@
     },
 
   "custom/updates-trigger": {
-    "format": "",
-    "exec": "echo ''",
-    "exec-if": "grep -q '\"class\":\"pending\"' ~/.config/dusky/settings/waybar_update_counter_h 2>/dev/null",
-    "interval": 5,
-    "tooltip": false
+      "format": "",
+      "exec": "grep -qE '\"class\"[[:space:]]*:[[:space:]]*\"(pending|unknown)\"' \"$HOME/.config/dusky/settings/waybar_update_counter_h\" 2>/dev/null && printf '\\n'",
+      "interval": 5,
+      "tooltip": false
   },
 
 	"custom/updates": {
@@ -256,20 +277,20 @@
 	},
 
   "custom/notifications": {
-		"justify": "center",
-		"align": 0.5,
-		"tooltip-format": "Left Click: Launch Mako\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
-		"format": "{}",
-		"return-type": "json",
-		"exec-if": "which makoctl",
-		"exec": "~/user_scripts/waybar/mako.sh --horizontal",
-		"interval": 2,
-		"on-click": "~/user_scripts/rofi/rofi_mako.sh",
-    "on-click-middle": "~/user_scripts/waybar/mako.sh --clear && pkill -RTMIN+8 waybar",
-		"on-click-right": "makoctl mode -t do-not-disturb && pkill -RTMIN+8 waybar",
-		"signal": 8,
-		"escape": true
-	},
+      "justify": "center",
+      "align": 0.5,
+      "tooltip-format": "{tooltip}\n\nLeft Click: Launch Mako\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
+      "format": "{}",
+      "return-type": "json",
+      "exec-if": "command -v makoctl >/dev/null 2>&1",
+      "exec": "~/user_scripts/waybar/mako.sh --horizontal",
+      "interval": 2,
+      "on-click": "~/user_scripts/rofi/rofi_mako.sh",
+      "on-click-middle": "~/user_scripts/waybar/mako.sh --clear && pkill -RTMIN+8 waybar",
+      "on-click-right": "makoctl mode -t do-not-disturb && pkill -RTMIN+8 waybar",
+      "signal": 8,
+      "escape": true
+  },
 
 /*	"group/mpris-drawer": {
 		"orientation": "inherit",
@@ -350,7 +371,7 @@
 		"on-click": "pactl set-source-mute @DEFAULT_SOURCE@ toggle",
 		"on-scroll-up": "pactl set-source-volume @DEFAULT_SOURCE@ +5%",
 		"on-scroll-down": "pactl set-source-volume @DEFAULT_SOURCE@ -5%",
-		"tooltip-format": "<b>Input Device</b>: {desc}"
+		"tooltip-format": "<b>Input Device</b>: {source_desc}"
 	},
 
 	"backlight": {
@@ -358,8 +379,8 @@
 		"format-icons": [
 			"", "", "", "", "", "", "", "", ""
 		],
-		"on-click": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
-		"on-click-right": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
+		"on-click": "\"$HOME/.local/bin/dusky_tray\"",
+		"on-click-right": "\"$HOME/.local/bin/dusky_tray\"",
 		"on-scroll-up": "brightnessctl set +5%",
 		"on-scroll-down": "brightnessctl set 5%-",
 		"tooltip": false
@@ -422,6 +443,7 @@
 	"custom/right_div#3": { "format": "", "tooltip": false },
 	"custom/right_div#4": { "format": "", "tooltip": false },
 	"custom/right_div#5": { "format": "", "tooltip": false },
+	"custom/right_div#6": { "format": "", "tooltip": false },
 
 	"custom/right_inv#1": { "format": "", "tooltip": false }
 }

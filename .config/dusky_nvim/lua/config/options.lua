@@ -4,7 +4,7 @@
 -- ================================================================================================
 
 -- Basic Settings
-vim.opt.background = "dark" -- Force dark background to bypass terminal DSR query delay
+vim.opt.background = "dark" -- Dusky uses a dark palette.
 vim.opt.number = true -- Line numbers
 vim.opt.relativenumber = true -- Relative line numbers
 -- vim.opt.cursorline = true -- Highlight current line
@@ -27,7 +27,7 @@ vim.opt.grepformat = "%f:%l:%c:%m" -- filename, line number, column, content
 
 -- Search Settings
 vim.opt.ignorecase = true -- Case-insensitive search
-vim.opt.smartcase = true -- Override ignorecase if uppercase in search (was false: comment contradicted value)
+vim.opt.smartcase = true -- Override ignorecase when the search contains uppercase
 vim.opt.hlsearch = true -- Highlight search results
 vim.opt.incsearch = true -- Show matches as you type
 
@@ -37,20 +37,18 @@ vim.opt.signcolumn = "yes" -- Always show sign column
 --vim.opt.colorcolumn = "100" -- Show column at 100 characters
 vim.opt.showmatch = true -- Highlight matching brackets
 vim.opt.matchtime = 2 -- How long to show matching bracket
-vim.opt.completeopt = "menu,menuone,noinsert,noselect,popup,fuzzy" -- Bleeding-edge 0.12: include popup + fuzzy for native completion
+vim.opt.completeopt = "menu,menuone,noinsert,noselect,popup,fuzzy" -- Native completion; nvim-cmp configures its own popup
 vim.opt.showmode = false -- Don't show mode in command line
-vim.opt.laststatus = 3 -- Global statusline (was 0 hides statusline, but lualine uses globalstatus=true; 0 caused flicker and missed diagnostics)
+vim.opt.laststatus = 3 -- Match lualine globalstatus
 vim.opt.ruler = false -- Hide default ruler (lualine handles it)
 vim.opt.pumheight = 10 -- Popup menu height
 vim.opt.pumblend = 10 -- Popup menu transparency
 vim.opt.winblend = 0 -- Floating window transparency
 vim.opt.conceallevel = 0 -- Don't hide markup
 vim.opt.concealcursor = "" -- Show markup even on cursor line
--- vim.opt.lazyredraw deprecated no-op in 0.12 (kept for compat would warn); removed
 vim.opt.redrawtime = 10000 -- Timeout for syntax highlighting redraw
 vim.opt.maxmempattern = 20000 -- Max memory for pattern matching
--- vim.opt.synmaxcol deprecated with treesitter; keep but increase for large files fallback
-vim.opt.synmaxcol = 500 -- Increased from 300 (treesitter handles most, but vim syntax fallback needs higher)
+vim.opt.synmaxcol = 500 -- Limit regex syntax highlighting on long lines
 
 -- File Handling
 vim.opt.backup = false -- Don't create backup files
@@ -58,19 +56,14 @@ vim.opt.writebackup = false -- Don't backup before overwriting
 vim.opt.swapfile = false -- Don't create swap files
 vim.opt.undofile = true -- Persistent undo
 vim.opt.updatetime = 250 -- Time in ms to trigger CursorHold
-vim.opt.timeoutlen = 500 -- Reduced from 2000 (was excessive wait for which-key; 500 is responsive yet still allows multi-key)
+vim.opt.timeoutlen = 500 -- Key mapping timeout
 vim.opt.ttimeoutlen = 0 -- No wait for key code sequences
 vim.opt.autoread = true -- Auto-reload file if changed outside
 vim.opt.autowrite = false -- Don't auto-save on some events
 -- diffopt: start from clean slate to avoid duplicate linematch:40 + linematch:60 seen in :checkhealth
 vim.opt.diffopt = "internal,filler,closeoff,vertical,algorithm:patience,linematch:60,indent-heuristic,inline:char"
 
--- Set undo directory and ensure it exists (use stdpath, uv fs_stat for 0.12)
-local undodir = vim.fn.stdpath("data") .. "/undodir"
-vim.opt.undodir = undodir
-if vim.uv.fs_stat(undodir) == nil then
-  vim.fn.mkdir(undodir, "p")
-end
+-- Neovim creates its default undo directory under stdpath("state") on write.
 
 -- Behavior Settings
 -- vim.opt.errorbells = false -- Disable error sounds
@@ -80,6 +73,7 @@ vim.opt.autochdir = false -- Don't change directory automatically
 vim.opt.path:append("**") -- Search into subfolders with `gf`
 vim.opt.selection = "inclusive" -- Use inclusive selection
 vim.opt.mouse = "a" -- Enable mouse support
+vim.opt.guicursor = "n-v-c:hor20-Cursor,i-ci-ve:ver25-Cursor,r-cr-o:hor20-Cursor"
 vim.opt.clipboard:append("unnamedplus") -- Use system clipboard
 vim.opt.modifiable = true -- Allow editing buffers
 vim.opt.wildmenu = true -- Enable command-line completion menu
@@ -87,12 +81,12 @@ vim.opt.wildmode = "longest:full,full" -- Completion mode for command-line
 vim.opt.wildignorecase = true -- Case-insensitive tab completion in commands
 
 -- Folding Settings (0.12 native: foldexpr requires treesitter parser for buffer, else fallback)
-vim.opt.foldmethod = "expr"
+vim.opt.foldmethod = "manual" -- Enable expression folds only with a working parser.
 vim.opt.foldexpr = "v:lua.vim.treesitter.foldexpr()"
 vim.opt.foldlevel = 99
 vim.opt.foldlevelstart = 99 -- Ensure folds open on new buffers
 vim.opt.foldenable = true
-vim.opt.foldtext = "" -- 0.12: use native treesitter foldtext (cleaner than legacy vim foldtext)
+vim.opt.foldtext = "" -- Show the original folded line with its highlighting
 
 -- Split Behavior
 vim.opt.splitbelow = true -- Horizontal splits open below

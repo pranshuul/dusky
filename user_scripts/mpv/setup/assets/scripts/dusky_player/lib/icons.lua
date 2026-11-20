@@ -44,6 +44,85 @@ icons.volume_down = {speaker, line({15,7,18,10,18,14,15,17})}
 icons.volume_mute = {speaker}
 icons.volume_off = {speaker, line({16,8,23,16}), line({23,8,16,16})}
 icons.check = {line({3,12,9,18,21,5})}
+local function round2(v)
+    return math.floor(v * 100 + 0.5) / 100
+end
+
+local rollback_arc = {}
+local arc_steps = 48
+local arc_start = math.rad(140)
+local arc_end = math.rad(-138)
+for i = 0, arc_steps do
+    local angle = arc_start + (arc_end - arc_start) * (i / arc_steps)
+    rollback_arc[#rollback_arc + 1] = round2(12 + 10 * math.cos(angle))
+    rollback_arc[#rollback_arc + 1] = round2(12 + 10 * math.sin(angle))
+end
+for i = arc_steps, 0, -1 do
+    local angle = arc_start + (arc_end - arc_start) * (i / arc_steps)
+    rollback_arc[#rollback_arc + 1] = round2(12 + 8 * math.cos(angle))
+    rollback_arc[#rollback_arc + 1] = round2(12 + 8 * math.sin(angle))
+end
+
+local arrow_base = math.rad(-135)
+local arrow_tip = math.rad(-163)
+local bx, by = 12 + 9 * math.cos(arrow_base), 12 + 9 * math.sin(arrow_base)
+local tx, ty = 12 + 9 * math.cos(arrow_tip), 12 + 9 * math.sin(arrow_tip)
+local ux, uy = tx - bx, ty - by
+local ulen = math.sqrt(ux * ux + uy * uy)
+ux, uy = ux / ulen, uy / ulen
+local nx, ny = -uy, ux
+local wing = 2.4
+
+local rollback_head = polygon({
+    round2(bx + wing * nx), round2(by + wing * ny),
+    round2(tx), round2(ty),
+    round2(bx - wing * nx), round2(by - wing * ny),
+})
+
+icons.history = {
+    polygon(rollback_arc),
+    rollback_head,
+    polygon({11, 6.8, 13, 6.8, 13, 11.49, 16.08, 13.69, 14.92, 15.31, 11, 12.51}),
+}
+icons.replay = {
+    polygon(rollback_arc),
+    rollback_head,
+}
+icons.folder = {
+    line({2,6,2,20,22,20,22,8,12,8,9,6,2,6}),
+}
+icons.folder_delete = {
+    line({2,6,2,20,22,20,22,8,12,8,9,6,2,6}),
+    line({10,11,16,17}),
+    line({16,11,10,17}),
+}
+icons.playlist_remove = {
+    line({2,5,15,5}),
+    line({2,11,15,11}),
+    line({2,17,10,17}),
+    line({14,13,21,20}),
+    line({21,13,14,20}),
+}
+icons.delete_sweep = {
+    line({15,16,19,16}),
+    line({15,12,21,12}),
+    line({15,8,22,8}),
+    line({3,8,4,20,12,20,13,8}),
+    line({2,6,14,6}),
+    line({6,6,6,4,10,4,10,6}),
+}
+icons.delete_forever = {
+    line({5,6,6,21,18,21,19,6}),
+    line({3,5,21,5}),
+    line({8,5,8,2,16,2,16,5}),
+    line({9,10,15,16}),
+    line({15,10,9,16}),
+}
+icons.check_box_outline_blank = icons.crop_square
+icons.check_box = {
+    line({4,4,20,4,20,20,4,20,4,4}),
+    line({7,12,10,15,17,8}),
+}
 icons.help_outline = icons.help
 icons.help_center = icons.help
 icons.chevron_right = icons.arrow_forward_ios

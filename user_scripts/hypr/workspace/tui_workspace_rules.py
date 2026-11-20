@@ -5,6 +5,7 @@ DUSKY TUI: MASTER CONFIGURATION SCHEMA (WORKSPACE RULES)
 ===============================================================================
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -18,14 +19,15 @@ from python.frontend.core_types import ConfigItem
 # 1. CORE APPLICATION ROUTING
 # =============================================================================
 ENGINE_TYPE = "lua"
-TARGET_FILE = "~/.config/hypr/edit_here/source/workspace_rules.lua"
+_config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+TARGET_FILE = str(_config_home / "hypr/edit_here/source/workspace_rules.lua")
 APP_TITLE = "Hyprland Workspace Rules"
 
 # =============================================================================
 # 2. UI & ENVIRONMENT BEHAVIOR
 # =============================================================================
 DEFAULT_MODE = "auto"
-THEME_FILE = "~/.config/matugen/generated/dusky_tui.json"
+THEME_FILE = str(_config_home / "matugen/generated/dusky_tui.json")
 
 ENABLE_USER_PRESETS = True
 USER_PRESETS_TAB = "Presets"
@@ -78,12 +80,72 @@ for i in range(1, 11):
             default=(i == 10),
             parent_ref=f"ws_{i}_menu",
             extended_help=f"**Workspace {i} Persistence**\n\nKeeps workspace {i} alive in bars and pagers even when all windows inside it are closed."
-        )
+        ),
     ])
+    WORKSPACE_ITEMS.extend([
+        ConfigItem(
+            label='Monitor Binding',
+            key='monitor',
+            scope=f"workspace_rule/{i}",
+            type_='string',
+            default='',
+            parent_ref=f"ws_{i}_menu",
+            extended_help='Output name or desc:description; empty leaves the workspace unbound.'
+        ),
+        ConfigItem(
+            label='Default on Monitor',
+            key='default',
+            scope=f"workspace_rule/{i}",
+            type_='bool',
+            default=False,
+            parent_ref=f"ws_{i}_menu",
+            extended_help='Make this the default workspace on its bound monitor.'
+        ),
+        ConfigItem(
+            label='Workspace Name',
+            key='default_name',
+            scope=f"workspace_rule/{i}",
+            type_='string',
+            default='',
+            parent_ref=f"ws_{i}_menu",
+            extended_help='Default display name; empty keeps the numbered name.'
+        ),
+    ])
+
+
+    # nil inherits other matching rules and the global appearance settings.
+    for key, label in (("border_size", "Border Size"), ("gaps_in", "Inner Gaps"),
+                       ("gaps_out", "Outer Gaps"), ("float_gaps", "Floating Gaps")):
+        WORKSPACE_ITEMS.append(ConfigItem(
+            label=label, key=key, scope=f"workspace_rule/{i}", type_="string",
+            default="nil", parent_ref=f"ws_{i}_menu",
+            extended_help=("nil inherits; enter an integer in pixels. " +
+                           ("Gaps also accept {top=4, left=8, right=8, bottom=4}."
+                            if key != "border_size" else "Overrides border thickness."))))
+    for key, label in (("no_border", "Disable Borders"), ("no_rounding", "Disable Rounding"),
+                       ("no_shadow", "Disable Shadows"), ("decorate", "Draw Decorations")):
+        WORKSPACE_ITEMS.append(ConfigItem(
+            label=label, key=key, scope=f"workspace_rule/{i}", type_="cycle",
+            default="nil", options=["nil", "true", "false"], parent_ref=f"ws_{i}_menu",
+            extended_help="nil inherits; true and false explicitly override this workspace rule."))
+    WORKSPACE_ITEMS.append(ConfigItem(
+        label="Workspace Animation Style", key="animation", scope=f"workspace_rule/{i}",
+        type_="string", default="nil", parent_ref=f"ws_{i}_menu",
+        extended_help="nil inherits. Set a workspace animation style, such as slide or slidevert."))
+    for key, label, values in (
+        ("orientation", "Master Orientation", ["left", "right", "top", "bottom", "center"]),
+        ("direction", "Scrolling Direction", ["right", "left", "down", "up"]),
+    ):
+        WORKSPACE_ITEMS.append(ConfigItem(
+            label=label, key=key, scope=f"workspace_rule/{i}/layout_opts", type_="cycle",
+            default="nil", options=["nil", *values], parent_ref=f"ws_{i}_menu",
+            extended_help="Per-workspace layout option. nil inherits; applies only to the corresponding layout."))
 
 
 # =============================================================================
 # 5. SCHEMA DEFINITION
+# The installed Lua parser rejects exact 0.1 minima and the 1.9 split-ratio
+# maximum. Use the nearest accepted values at the frontend's six-decimal precision.
 # =============================================================================
 SCHEMA = {
     # -------------------------------------------------------------------------
@@ -100,8 +162,6 @@ SCHEMA = {
             group="General Layout",
             extended_help="**Layout Override**\n\nSets the global default tiling layout for workspaces without specific overrides."
         ),
-        
-        # --- FOCUS & BEHAVIOR FOLDER ---
         ConfigItem(
             label="Focus & Miscellaneous",
             key="misc_menu_id",
@@ -128,7 +188,7 @@ SCHEMA = {
             type_="bool",
             default=True,
             parent_ref="misc_menu_id",
-            extended_help="**Focus on Activate**\n\nAutomatically focus a window that requests activation (e.g., urgency hint or xdg_activation)."
+            extended_help="**Focus on Activate**\n\nFocus a window when it sends an activation request."
         ),
         ConfigItem(
             label="Focus Under Fullscreen",
@@ -136,10 +196,12 @@ SCHEMA = {
             scope="misc",
             type_="int",
             default=2,
+            min_val=0,
+            max_val=2,
             options=[0, 1, 2],
-            hints=["0: Keep behind", "1: Unfullscreen current", "2: Swap fullscreen to new"],
+            hints=["0: Keep fullscreen focus", "1: Take over", "2: Unfullscreen/unmaximize"],
             parent_ref="misc_menu_id",
-            extended_help="**Focus Under Fullscreen**\n\nBehaviour when a window is focused while another is fullscreen:\n- 0 = Do nothing (new window stays behind)\n- 1 = New window takes over (unfullscreens current)\n- 2 = Swap (unfullscreen current, fullscreen the new one)"
+            extended_help="**Focus Under Fullscreen**\n\nBehaviour when a tiled window requests focus while another window is fullscreen or maximized:\n- 0 = Ignore request; keep fullscreen window focused\n- 1 = Focused window takes over\n- 2 = Exit fullscreen/maximized state"
         ),
         ConfigItem(
             label="Workspace Tracking",
@@ -147,13 +209,13 @@ SCHEMA = {
             scope="misc",
             type_="int",
             default=1,
+            min_val=0,
+            max_val=2,
             options=[0, 1, 2],
-            hints=["0: Disabled", "1: Track invocation workspace", "2: Strict tracking"],
+            hints=["0: Disabled", "1: Single-shot", "2: Persistent (children too)"],
             parent_ref="misc_menu_id",
-            extended_help="**Workspace Tracking**\n\nForces new windows to spawn on the workspace they were invoked from:\n- 0 = Disabled\n- 1 = Standard tracking (invoked workspace)\n- 2 = Strict tracking"
+            extended_help="**Workspace Tracking**\n\nForces new windows to spawn on the workspace they were invoked from:\n- 0 = Disabled\n- 1 = Single-shot tracking of the invocation workspace\n- 2 = Persistent tracking, including child windows"
         ),
-
-        # --- NAVIGATION FOLDER ---
         ConfigItem(
             label="Navigation & Binds",
             key="binds_menu_id",
@@ -177,8 +239,12 @@ SCHEMA = {
             label="Workspace Back and Forth",
             key="workspace_back_and_forth",
             scope="binds",
-            type_="bool",
-            default=False,
+            type_="int",
+            default=0,
+            min_val=0,
+            max_val=2,
+            options=[0, 1, 2],
+            hints=["0: Disabled", "1: All monitors", "2: Per monitor"],
             parent_ref="binds_menu_id",
             extended_help="**Back and Forth**\n\nRe-dispatching to the active workspace switches back to the previously active one."
         ),
@@ -189,7 +255,7 @@ SCHEMA = {
             type_="bool",
             default=False,
             parent_ref="binds_menu_id",
-            extended_help="**Allow Cycles**\n\nCycling past workspace 1 wraps to the highest-numbered, and vice versa."
+            extended_help="**Allow Cycles**\n\nWorkspaces remember their previous workspace, allowing repeated previous-workspace navigation to form cycles."
         ),
         ConfigItem(
             label="Workspace Center On",
@@ -197,10 +263,12 @@ SCHEMA = {
             scope="binds",
             type_="int",
             default=0,
-            options=[0, 1, 2],
-            hints=["0: Cursor stays", "1: Move to window", "2: Move to monitor"],
+            min_val=0,
+            max_val=1,
+            options=[0, 1],
+            hints=["0: Workspace center", "1: Last active window"],
             parent_ref="binds_menu_id",
-            extended_help="**Workspace Center On**\n\nCursor behavior on workspace switch:\n- 0 = Cursor stays in place\n- 1 = Moves to center of new window\n- 2 = Moves to center of monitor"
+            extended_help="**Workspace Center On**\n\nWhere to center the cursor on a workspace switch: 0 centers on the workspace, 1 on its last active window. Cursor warp settings determine whether a warp occurs."
         ),
         ConfigItem(
             label="Hide Special on Change",
@@ -218,7 +286,7 @@ SCHEMA = {
             type_="bool",
             default=True,
             parent_ref="binds_menu_id",
-            extended_help="**Movefocus Cycles Fullscreen**\n\nAllow 'movefocus' to wrap around into/out of fullscreen windows."
+            extended_help="**Movefocus Cycles Fullscreen**\n\nAllow directional focus to seek windows from fullscreen. When disabled, it seeks monitors instead."
         ),
         ConfigItem(
             label="Monitor Edge Fallback",
@@ -228,6 +296,185 @@ SCHEMA = {
             default=True,
             parent_ref="binds_menu_id",
             extended_help="**Monitor Fallback**\n\nMoving a window past the edge of a monitor moves it to the adjacent monitor."
+        ),
+        ConfigItem(
+            label='Directional Focus Preference',
+            key='focus_preferred_method',
+            scope='binds',
+            type_='int',
+            default=0,
+            min_val=0,
+            max_val=1,
+            options=[0, 1],
+            parent_ref='binds_menu_id',
+            extended_help='0 most recently used window, 1 longest shared edge.'
+        ),
+        ConfigItem(
+            label='Cycle Group Tabs Before Leaving',
+            key='movefocus_cycles_groupfirst',
+            scope='binds',
+            type_='bool',
+            default=False,
+            parent_ref='binds_menu_id',
+            extended_help='Visit group tabs first during directional focus, then other windows.'
+        ),
+        ConfigItem(
+            label='Dispatchers Ignore Group Lock',
+            key='ignore_group_lock',
+            scope='binds',
+            type_='bool',
+            default=False,
+            parent_ref='binds_menu_id',
+            extended_help='Allow group movement dispatchers to ignore individual group locks.'
+        ),
+        ConfigItem(
+            label='Workspace Tracking Timeout',
+            key='initial_workspace_token_timeout',
+            scope='misc',
+            type_='int',
+            default=10,
+            min_val=1,
+            max_val=3600,
+            step=1,
+            parent_ref='misc_menu_id',
+            extended_help='Seconds an invoked window has to open before its workspace token expires.'
+        ),
+        ConfigItem(
+            label='Retain Fullscreen After Close',
+            key='exit_window_retains_fullscreen',
+            scope='misc',
+            type_='int',
+            default=0,
+            min_val=0,
+            max_val=3,
+            options=[0, 1, 2, 3],
+            parent_ref='misc_menu_id',
+            extended_help='0 disabled, 1 enabled, 2 only grouped, 3 only ungrouped windows.'
+        ),
+        ConfigItem(
+            label='Keep Floating Windows Onscreen',
+            key='float_force_onscreen',
+            scope='misc',
+            type_='int',
+            default=0,
+            min_val=0,
+            max_val=2,
+            options=[0, 1, 2],
+            parent_ref='misc_menu_id',
+            extended_help='0 unconstrained, 1 partially visible, 2 fully visible.'
+        ),
+        ConfigItem(
+            label='New Floating Windows Onscreen',
+            key='new_float_force_onscreen',
+            scope='misc',
+            type_='int',
+            default=2,
+            min_val=0,
+            max_val=2,
+            options=[0, 1, 2],
+            parent_ref='misc_menu_id',
+            extended_help='0 unconstrained, 1 partially visible, 2 fully visible.'
+        ),
+        ConfigItem(
+            label='Respect Tiled Window Size Limits',
+            key='size_limits_tiled',
+            scope='misc',
+            type_='bool',
+            default=False,
+            parent_ref='misc_menu_id',
+            extended_help='Apply min_size and max_size rules to tiled windows.'
+        ),
+        ConfigItem(
+            label='Block Modal Parent Input',
+            key='modal_parent_blocking',
+            scope='general',
+            type_='bool',
+            default=True,
+            group='General Layout',
+            extended_help='Prevent interaction with a parent window while its modal dialog is open.'
+        ),
+        ConfigItem(
+            label='Disable Empty Direction Focus Fallback',
+            key='no_focus_fallback',
+            scope='general',
+            type_='bool',
+            default=False,
+            group='General Layout',
+            extended_help='Do not focus another candidate when directional focus finds no window.'
+        ),
+        ConfigItem(
+            label='Single Window Aspect Width',
+            key='1',
+            scope='layout/single_window_aspect_ratio',
+            type_='float',
+            default=0.0,
+            group='Single Window Geometry',
+            min_val=0,
+            max_val=1000,
+            step=1,
+            extended_help='Aspect ratio for a lone window, e.g. 4 and 3. Zero disables extra aspect padding.'
+        ),
+        ConfigItem(
+            label='Single Window Aspect Height',
+            key='2',
+            scope='layout/single_window_aspect_ratio',
+            type_='float',
+            default=0.0,
+            group='Single Window Geometry',
+            min_val=0,
+            max_val=1000,
+            step=1,
+            extended_help='Aspect ratio for a lone window, e.g. 4 and 3. Zero disables extra aspect padding.'
+        ),
+        ConfigItem(
+            label='Aspect Padding Tolerance',
+            key='single_window_aspect_ratio_tolerance',
+            scope='layout',
+            type_='float',
+            default=0.1,
+            group='Single Window Geometry',
+            min_val=0,
+            max_val=1,
+            step=0.01,
+            extended_help='Ignore aspect padding smaller than this fraction of screen width or height.'
+        ),
+        ConfigItem(
+            label='Automatically Group New Windows',
+            key='auto_group',
+            scope='group',
+            type_='bool',
+            default=True,
+            group='Window Group Behavior',
+            extended_help='New windows join the focused unlocked group.'
+        ),
+        ConfigItem(
+            label='Drag Into Groups',
+            key='drag_into_group',
+            scope='group',
+            type_='int',
+            default=1,
+            group='Window Group Behavior',
+            min_val=0, max_val=2,
+            options=[0, 1, 2],
+            extended_help='0 disabled, 1 enabled, 2 only through the groupbar.'
+        ),
+        ConfigItem(
+            label='Group on Workspace Move',
+            key='group_on_movetoworkspace',
+            scope='group',
+            type_='bool',
+            default=False,
+            group='Window Group Behavior',
+            extended_help='Moving a window into a workspace merges it with a solitary unlocked group.'
+        ),
+        ConfigItem(
+            label='Insert Group Tab After Current',
+            key='insert_after_current',
+            scope='group',
+            type_='bool',
+            default=True,
+            group='Window Group Behavior',
+            extended_help='Insert new group tabs after the active tab instead of at the end.'
         ),
     ],
 
@@ -256,10 +503,12 @@ SCHEMA = {
             scope="scrolling",
             type_="int",
             default=0,
+            min_val=0,
+            max_val=1,
             options=[0, 1],
-            hints=["0: Center (preview both sides)", "1: Fit (preview right only)"],
+            hints=["0: Center", "1: Fit with minimal scrolling"],
             group="Scrolling Layout Settings",
-            extended_help="**Focus Alignment (focus_fit_method)**\n\nControls how the active column is positioned on screen when brought into view:\n\n- **0: Center (Both Sides Preview)**: Centers the focused column directly in the middle of the monitor. When `column_width` is less than `1.0` (such as `0.9` or `0.85`), adjacent windows peek in from **both** the left and right edges, providing a balanced preview of previous and next columns.\n- **1: Fit (Trailing Preview Only)**: Scrolls just enough to fit the column flush against the screen edge. Leaves preview space only on the trailing side, hiding any preview on the leading side."
+            extended_help="0 centers the focused column; 1 scrolls only as far as needed to fit it on screen. Applies in horizontal and vertical directions."
         ),
         ConfigItem(
             label="Column Width",
@@ -267,11 +516,11 @@ SCHEMA = {
             scope="scrolling",
             type_="float",
             default=0.9,
-            min_val=0.1,
+            min_val=0.100001,
             max_val=1.0,
             step=0.05,
             group="Scrolling Layout Settings",
-            extended_help="**Column Width**\n\nThe default width of a new column as a percentage fraction of the screen (0.1 - 1.0). For example, 0.9 occupies 90% of screen width, leaving 5% peek margins on both left and right edges when Focus Alignment is set to Center."
+            extended_help="**Column Width**\n\nDefault column size as a fraction of the available layout space. Center alignment leaves room for neighboring columns when this is less than 1.0."
         ),
         ConfigItem(
             label="Fullscreen Single Column",
@@ -286,10 +535,11 @@ SCHEMA = {
             label="Follow Focus",
             key="follow_focus",
             scope="scrolling",
-            type_="bool",
-            default=True,
+            type_="int",
+            default=1,
+            min_val=0, max_val=2, step=1,
             group="Scrolling Layout Settings",
-            extended_help="**Follow Focus**\n\nWhen enabled, automatically scrolls the layout tape to bring a window into view when it receives focus."
+            extended_help="**Follow Focus**\n\n0: focus does not move the tape. 1: follow focus and always scroll on mouse clicks. 2: follow focus without forcing click scrolling. Pointer focus also obeys Min Focus Visibility."
         ),
         ConfigItem(
             label="Min Focus Visibility",
@@ -319,7 +569,7 @@ SCHEMA = {
             type_="bool",
             default=True,
             group="Scrolling Layout Settings",
-            extended_help="**Wrap Focus**\n\nWhen enabled, focusing past the ends of the layout tape wraps around between the first and last columns."
+            extended_help="**Wrap Focus**\n\nWrap between the first and last columns when using the layout focus dispatcher (hl.dsp.layout('focus l/r'))."
         ),
         ConfigItem(
             label="Wrap Column Swap",
@@ -342,10 +592,12 @@ SCHEMA = {
             scope="dwindle",
             type_="int",
             default=0,
+            min_val=0,
+            max_val=2,
             options=[0, 1, 2],
-            hints=["0: Follow direction", "1: Right/Down", "2: Left/Up"],
+            hints=["0: Follow mouse", "1: Left/Up", "2: Right/Down"],
             group="Dwindle Layout Settings",
-            extended_help="**Force Split**\n\n0 = Split follows mouse (last window direction)\n1 = Always split right/down\n2 = Always split left/up"
+            extended_help="**Force Split**\n\n0 = Split follows mouse\n1 = Always split left/up\n2 = Always split right/down"
         ),
         ConfigItem(
             label="Preserve Split",
@@ -389,7 +641,7 @@ SCHEMA = {
             scope="dwindle",
             type_="float",
             default=1.0,
-            min_val=0.5,
+            min_val=0.100001,
             max_val=3.0,
             step=0.1,
             group="Dwindle Layout Settings",
@@ -410,8 +662,8 @@ SCHEMA = {
             scope="dwindle",
             type_="float",
             default=1.0,
-            min_val=0.1,
-            max_val=1.9,
+            min_val=0.100001,
+            max_val=1.899999,
             step=0.1,
             group="Dwindle Layout Settings",
             extended_help="**Default Split Ratio**\n\nThe ratio on window open. 1.0 means an even 50/50 split."
@@ -422,6 +674,8 @@ SCHEMA = {
             scope="dwindle",
             type_="int",
             default=0,
+            min_val=0,
+            max_val=1,
             options=[0, 1],
             hints=["0: Directional (top/left)", "1: Active window"],
             group="Dwindle Layout Settings",
@@ -487,11 +741,11 @@ SCHEMA = {
             scope="master",
             type_="float",
             default=0.55,
-            min_val=0.10,
-            max_val=0.90,
+            min_val=0.0,
+            max_val=1.0,
             step=0.05,
             group="Master Layout Settings",
-            extended_help="**Master Fraction (mfact)**\n\nThe percentage fraction (0.1 - 0.9) of the screen the master pane occupies."
+            extended_help="**Master Fraction (mfact)**\n\nThe percentage fraction (0.0 - 1.0) of the screen the master pane occupies."
         ),
         ConfigItem(
             label="Allow Small Split",
@@ -582,12 +836,13 @@ SCHEMA = {
             type_="preset",
             default=None,
             group="Profiles & Actions",
+            preset_partial=True,
             preset_payload={
                 "misc.on_focus_under_fullscreen": 2,
                 "misc.initial_workspace_tracking": 1,
                 "misc.focus_on_activate": True
             },
-            extended_help="**Strict Focus**\n\nApplies recommended behavior: popups and new windows drop fullscreen apps to reveal the newly focused window immediately."
+            extended_help="**Strict Focus**\n\nEnable activation-request focus and exit fullscreen/maximized state when a tiled window requests focus. Keep single-shot invocation-workspace tracking."
         ),
         ConfigItem(
             label="Immersive/Do Not Disturb Profile",
@@ -596,11 +851,12 @@ SCHEMA = {
             type_="preset",
             default=None,
             group="Profiles & Actions",
+            preset_partial=True,
             preset_payload={
                 "misc.on_focus_under_fullscreen": 0,
                 "misc.focus_on_activate": False
             },
-            extended_help="**Immersive Profile**\n\nPrevents any background application from stealing focus or dropping your current fullscreen application."
+            extended_help="**Immersive Profile**\n\nDisables activation-request focus and ignores tiled-window focus requests while another window is fullscreen. Other focus mechanisms still apply."
         ),
         ConfigItem(
             label="Balanced Scrolling Profile",
@@ -609,26 +865,72 @@ SCHEMA = {
             type_="preset",
             default=None,
             group="Profiles & Actions",
+            preset_partial=True,
             preset_payload={
                 "scrolling.focus_fit_method": 0,
                 "scrolling.column_width": 0.9,
                 "scrolling.fullscreen_on_one_column": True,
-                "scrolling.follow_focus": True,
+                "scrolling.follow_focus": 1,
                 "scrolling.follow_min_visible": 0.4
             },
-            extended_help="**Balanced Scrolling Profile**\n\nApplies centered focus alignment (previews visible on both left and right edges) with 90% column width for balanced scrolling workspaces."
+            extended_help="**Balanced Scrolling Profile**\n\nCenter focused columns with 90% column size and previews of neighboring columns. Preserve the current scrolling direction."
         ),
         ConfigItem(
-            label="Reload Window Rules",
+            label="Reload Workspace Configuration",
             key="action_reload_hypr",
             scope="DEFAULT",
             type_="action",
-            default="hyprctl reload",
+            default="hyprctl reload config-only",
             group="Profiles & Actions",
-            extended_help="**Reload Environment**\n\nForces Hyprland to re-read all window rules and configuration files without terminating the session."
+            extended_help="**Reload Environment**\n\nRe-read configuration without reconfiguring monitors. Configuration reload callbacks still run."
         ),
     ]
 }
+
+
+# Behavioral controls belong here; groupbar styling remains in Appearance.
+for key, label, default, help_text in (
+    ("focus_removed_window", "Focus Removed Group Window", True, "Focus a window when it is removed from its group."),
+    ("merge_groups_on_drag", "Merge Groups on Drag", True, "Allow dragging one group into another to merge them."),
+    ("merge_groups_on_groupbar", "Merge Groups Through Groupbar", True, "Merge by dragging onto a groupbar; requires drag_into_group=2 and merge_groups_on_drag."),
+    ("merge_floated_into_tiled_on_groupbar", "Merge Floating Into Tiled Groups", False, "Allow floating windows to join tiled groups through the groupbar."),
+):
+    SCHEMA[0].append(ConfigItem(label=label, key=key, scope="group", type_="bool",
+                                default=default, group="Window Group Behavior", extended_help=help_text))
+for key, label, default, help_text in (
+    ("pass_mouse_when_bound", "Pass Bound Mouse Events", False, "Pass mouse events to applications even when a mouse bind matches."),
+    ("disable_keybind_grabbing", "Disable Application Keybind Grabs", False, "Prevent applications from grabbing keybinds through shortcuts inhibition."),
+    ("drag_center_window", "Center Window on Drag", True, "Center a dragged tiled or fullscreen window on the cursor when it becomes floating."),
+):
+    SCHEMA[0].append(ConfigItem(label=label, key=key, scope="binds", type_="bool",
+                                default=default, parent_ref="binds_menu_id", extended_help=help_text))
+for key, label, default, maximum, help_text in (
+    ("scroll_event_delay", "Scroll Bind Delay (ms)", 300, 2000, "Minimum delay between scroll-wheel keybind activations."),
+    ("drag_threshold", "Drag Threshold (px)", 0, 2147483647, "Movement required to start a drag; zero starts immediately."),
+):
+    SCHEMA[0].append(ConfigItem(label=label, key=key, scope="binds", type_="int", default=default,
+                                min_val=0, max_val=maximum, step=1, parent_ref="binds_menu_id", extended_help=help_text))
+for key, label, help_text in (
+    ("mouse_move_focuses_monitor", "Pointer Focuses Monitor", "Focus a monitor when the pointer moves onto it."),
+    ("always_follow_on_dnd", "Follow Focus While Dragging", "Let focus follow the pointer during drag and drop, including when focus follows mouse is disabled."),
+    ("layers_hog_keyboard_focus", "Layers Retain Keyboard Focus", "Keyboard-interactive layers keep keyboard focus when the pointer moves."),
+):
+    SCHEMA[0].append(ConfigItem(label=label, key=key, scope="layers" if key == "layers_hog_keyboard_focus" else "misc",
+                                type_="bool", default=True, parent_ref="misc_menu_id", extended_help=help_text))
+SCHEMA[0].append(ConfigItem(
+    label="New Top Layers Over Fullscreen", key="allow_new_top_layers_over_existing_fullscreen",
+    scope="layers", type_="bool", default=True, parent_ref="misc_menu_id",
+    extended_help="Allow newly opened top layers over an existing covering fullscreen window. Pre-existing top layers remain hidden by fullscreen."
+))
+SCHEMA[0].append(ConfigItem(label="Enable Window Swallowing", key="enable_swallow", scope="misc",
+                            type_="bool", default=False, group="Window Swallowing",
+                            extended_help="Hide a matching parent window while its child window is open."))
+for key, label, help_text in (
+    ("swallow_regex", "Parent Class Pattern", "Class regex for windows to swallow, usually a terminal; empty matches none."),
+    ("swallow_exception_regex", "Parent Title Exceptions", "Regex matched against the parent's title to exclude it from swallowing; empty excludes none."),
+):
+    SCHEMA[0].append(ConfigItem(label=label, key=key, scope="misc", type_="string", default="",
+                                group="Window Swallowing", extended_help=help_text))
 
 # =============================================================================
 # DIRECT EXECUTION HANDLER

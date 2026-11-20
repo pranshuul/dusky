@@ -180,21 +180,6 @@ _vid() {
 }
 alias vid='noglob _vid'
 
-# Local AI Web Bridge Shortcut
-_ask_func() {
-    local prompt=""
-    if [ $# -eq 0 ]; then
-        read -r "prompt?Prompt: "
-        if [ -z "$prompt" ]; then
-            return 0
-        fi
-    else
-        prompt="$*"
-    fi
-    python3 "$HOME/.config/firefox_extentions/ai_bridge/bridge.py" "$prompt"
-}
-alias ask='noglob _ask_func'
-
 # Memory Optimization
 alias mem_optimize='sudo systemctl start dusky_pro_active_zram_swap.service'
 
@@ -251,8 +236,9 @@ mkcd() {
 local conf_dir="$HOME/.config/zshrc"
 local -a my_modules=(
     batstat git kvm lmstudio logs logs_old mon_info
-    pkg pkg_search res_mon vfio waydroid win10 wthr cmd_atlas
-    sshfile scripts neovim_delta core zoxide gemini stt_dusky
+    pkg pkg_search res_mon vfio waydroid win11 wthr cmd_atlas
+    sshfile scripts neovim_delta core gemini stt_dusky session
+    ai_bridge
 )
 
 for mod in "${my_modules[@]}"; do
@@ -311,7 +297,8 @@ _dusky_load_matugen_fzf() {
 _dusky_load_matugen_fzf
 
 
-# --- Zoxide: lives in ~/.config/zshrc/zoxide (sourced via [6] modules) ---
+# --- Zoxide: load after its fzf theme is available ---
+[[ -f "$HOME/.config/zshrc/zoxide" ]] && source "$HOME/.config/zshrc/zoxide"
 
 # Cleanup
 unset _starship_cache _starship_bin _fzf_cache _fzf_bin
@@ -338,7 +325,8 @@ fi
 # -----------------------------------------------------------------------------
 # Native variable check avoids expensive $(tty) subshells
 if [[ -z "$DISPLAY" && -z "$WAYLAND_DISPLAY" && "$TTY" == "/dev/tty1" ]]; then
-  exec start-hyprland
+  # Preserve startup diagnostics in the journal instead of painting tty1.
+  exec systemd-cat --identifier=hyprland-session --stderr-priority=err start-hyprland
 fi
 
 

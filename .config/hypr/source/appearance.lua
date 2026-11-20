@@ -22,7 +22,14 @@ hl.config({
         extend_border_grab_area = 15, -- Extends click/drag area around the border (needs resize_on_border)
         hover_icon_on_border = true, -- Shows cursor icon when hovering over borders (needs resize_on_border)
         allow_tearing = true, -- Master switch for allowing tearing to occur
-        resize_corner = 0 -- Forces floating windows to use specific corner when resized (1-4, 0 to disable)
+        resize_corner = 0, -- Forces floating windows to use specific corner when resized (1-4, 0 to disable)
+        snap = {
+            enabled = false,
+            window_gap = 10,
+            monitor_gap = 10,
+            border_overlap = false,
+            respect_gaps = false,
+        }
     },
 
     -- ==========================================
@@ -66,7 +73,7 @@ hl.config({
             range = 6, -- Shadow range ("size") in layout px
             render_power = 1, -- Falloff power (more power = faster falloff) [1 - 4]
             sharp = false, -- Make shadows sharp, akin to infinite render power
-            color = "rgba(1a1a1aee)", -- Shadow's color. Alpha dictates opacity
+            color = string.gsub(shadow, "..%)$", "ee)"), -- Shadow's color. Alpha dictates opacity
             offset = {0, 0}, -- Shadow's rendering offset
             scale = 1.0 -- Shadow's scale [0.0 - 1.0]
         },
@@ -143,7 +150,7 @@ hl.config({
         animate_manual_resizes = false, -- Animate manual window resizes/moves
         animate_mouse_windowdragging = false, -- Animate windows being dragged by mouse
         background_color = background, -- Custom background color
-        render_unfocused_fps = 5, -- Max FPS limit for unfocused background windows
+        render_unfocused_fps = 5, -- FPS cap for windows with the render_unfocused rule
         enable_anr_dialog = true -- Enable "App Not Responding" dialog
     },
 
@@ -182,9 +189,8 @@ hl.config({
 -- Applied when exactly one tiled window is on screen (w[tv1]), or when
 -- a window is maximized (f[1]). Excludes special/scratchpad workspaces (s[false]).
 --
--- WHAT CANNOT BE SET HERE (window rules don't support these — global hl.config() only):
---   • rounding_power  → decoration.rounding_power in hl.config()
---   • no_shadow / no_dim → no per-window shadow or dim suppression in 0.55 window rules
+-- SETTINGS THAT BELONG IN WORKSPACE RULES OR GLOBAL hl.config():
+--   • no_shadow → use hl.workspace_rule({ workspace = ..., no_shadow = true })
 --   • blur sub-options (size, passes, etc.) → decoration.blur in hl.config()
 --   • border_size → must live in hl.workspace_rule(), not hl.window_rule()
 -- -------------------------------------------------------------------------------------------------
@@ -204,11 +210,8 @@ hl.window_rule({
     rounding      = 6,
     rounding_power = 2.0,
     -- OPACITY
-    -- format: "active [override] inactive [override] fullscreen [override]"
-    -- "override" makes it absolute instead of multiplicative with other rules
-    -- your global active_opacity and inactive_opacity are both 0.85
-    -- using override here so it doesn't compound with the global value
-    -- opacity       = "0.85 override 0.85 override 1.0 override",
+    -- Numeric opacity multiplies the global active/inactive/fullscreen opacity.
+    -- 1.0 leaves the global opacity unchanged.
     opacity       = 1.0,
 
     -- BLUR
@@ -235,10 +238,10 @@ hl.window_rule({
 -- Maximized window (f[1] = workspace has a maximized window)
 hl.window_rule({
     name  = "maximized_window_style",
-    match = { float = true, workspace = "f[1]s[false]" },
+    match = { float = false, workspace = "f[1]s[false]" },
 
     rounding      = 10,
-    opacity       = 1.0, -- override 0.85 override 1.0 override"
+    opacity       = 1.0, -- Inherit the global opacity.
     no_blur       = true,
 
     -- border_color = "rgb(ffffff) rgb(000000) 45deg",
@@ -251,11 +254,11 @@ hl.window_rule({
 -- "magic"  → toggled with SUPER+Z  (hl.dsp.workspace.toggle_special("magic"))
 --
 -- A special workspace is a floating overlay that appears on top of your current workspace.
--- The background dims according to decoration.dim_special (currently 0.8 in hl.config()).
+-- The background dims according to decoration.dim_special (currently 0.7 in hl.config()).
 -- The blur *behind* the overlay is controlled by decoration.blur.special (currently false).
 --
 -- WHAT CANNOT BE SET PER SPECIAL WORKSPACE (global hl.config() only):
---   • dim_special   → decoration.dim_special        ← already 0.8 in your hl.config()
+--   • dim_special   → decoration.dim_special        ← already 0.7 in your hl.config()
 --   • blur.special  → decoration.blur.special       ← currently false; set true to blur behind it
 --   • col.active_border / col.inactive_border       ← global only; use border_color in window_rule
 -- -------------------------------------------------------------------------------------------------
@@ -277,13 +280,13 @@ hl.window_rule({
     rounding       = 6,
     rounding_power = 2.0,
 
-    -- OPACITY: more opaque than your global 0.85 so it pops against the dimmed background
+    -- OPACITY: multiplies the global opacity; 1.0 leaves it unchanged
     opacity        = 0.92,
 
-    -- BORDER COLOR: secondary instead of primary so you can visually tell this isn't a normal window
+    -- BORDER COLOR: outline distinguishes the scratchpad from normal windows
     border_color   = outline,
 
-    -- BLUR: keep enabled to match your global blur.enabled = true
+    -- BLUR: disable blur for scratchpad windows
     no_blur        = true,
 })
 
@@ -294,3 +297,120 @@ hl.window_rule({
 
 -- Sourcing active animations
 require("source.animations.active.active")
+
+-- Additional appearance controls; defaults keep costly effects disabled.
+-- Hyprland Git options verified against commit 19fb395d4 (2026-10-04).
+-- Animation curves and animations.enabled remain in the active animation file.
+hl.config({
+    decoration = {
+        blur = {
+            variant = "kawase",
+            acrylic = {
+                aberration = 0.025,
+                bulb = 48.0,
+                clarity = 0.82,
+                refraction = 24.0,
+                tint = string.gsub(surface_tint, "..%)$", "14)"),
+            },
+            aurora = {
+                color1 = string.gsub(primary, "..%)$", "29)"),
+                color2 = string.gsub(tertiary, "..%)$", "7a)"),
+                intensity = 0.35,
+                speed = 1.0,
+            },
+            drops = {
+                speed = 3.0,
+            },
+            fluid_jar = {
+                color = string.gsub(primary, "..%)$", "cc)"),
+                distortion = 8.0,
+                fill_amount = 0.5,
+                mass = 1.4,
+                precision = 2.0,
+                speed = 3.7,
+                turbulence = 1.2,
+            },
+            glass = {
+                refraction = 20.0,
+                roughness = 1.0,
+                size = 40.0,
+            },
+            haze = {
+                intensity = 0.35,
+                iridescence = 0.7,
+            },
+            heat_shimmer = {
+                speed = 1.0,
+            },
+            ripple = {
+                duration = 0.45,
+                radius = 400.0,
+                strength = 30.0,
+                width = 32.0,
+            },
+            water = {
+                damping = 0.95,
+                duration = 12.0,
+                radius = 20.0,
+                speed = 0.76,
+                strength = 32.0,
+            },
+        },
+        shadow = {
+            color_inactive = nil, -- Inherit the active color.
+        },
+        glow = {
+            color_inactive = nil, -- Inherit the active color.
+        },
+        motion_blur = {
+            enabled = false,
+            samples = 7,
+        },
+        wobble = {
+            enabled = false,
+            mesh = 12,
+            stiffness = 200.0,
+            damping = 12.0,
+            mass = 1.0,
+            intensity = 0.2,
+            value_epsilon = 0.25,
+            velocity_epsilon = 2.0,
+        },
+    },
+    group = {
+        groupbar = {
+            disable_when_only = false,
+            middle_click_close = true,
+            scrolling = true,
+        },
+    },
+    misc = {
+        anr_missed_pings = 5,
+        screencopy_force_8b = true, -- Keep capture buffers at Hyprland's default 8-bit depth.
+        session_lock_xray = false,
+        session_lock_blur = false,
+        col = {
+            splash = string.gsub(on_surface, "..%)$", "55)"),
+        },
+        vrr = 0,
+    },
+    render = {
+        async_commit = false,
+        cm_auto_hdr = 1,
+        cm_enabled = true,
+        cm_sdr_eotf = "default",
+        commit_timing_enabled = true,
+        fp16_sdr_tf = 0,
+        icc_vcgt_enabled = true,
+        keep_unmodified_copy = 2,
+        new_render_scheduling = false,
+        not_shown_fifo_lock = 0,
+        non_shader_cm = 3,
+        non_shader_cm_interop = 2,
+        send_content_type = true,
+        use_fp16 = 2,
+    },
+    debug = {
+        vfr = true,
+    },
+})

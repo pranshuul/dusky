@@ -1,0 +1,27 @@
+pkgname=dusky_papers
+pkgver=1.1.0
+pkgrel=2
+pkgdesc='Dusky Papers wallpaper browser for Hyprland'
+arch=('x86_64')
+license=('custom')
+depends=('glibc' 'gcc-libs' 'wayland' 'libxkbcommon' 'vulkan-icd-loader' 'mesa' 'libglvnd')
+makedepends=('cargo' 'python')
+build() {
+  cp -aL -- "$DUSKY_PACKAGE_SOURCE" "$srcdir/project"
+  python "$DUSKY_BUILD_RUST" "$srcdir/project" "$srcdir/binary-output/dusky_papers"
+}
+
+package() {
+  install -Dm755 "$srcdir/binary-output/dusky_papers" \
+    "$pkgdir/usr/bin/dusky_papers"
+  install -d "$pkgdir/usr/share/dusky_papers"
+  python - "$srcdir/project" "$DUSKY_BUILD_RUST" > "$pkgdir/usr/share/dusky_papers/source.sha256" <<'PY'
+import sys
+from pathlib import Path
+
+project = Path(sys.argv[1])
+sys.path.insert(0, str(Path(sys.argv[2]).resolve().parent))
+from build_rust import shared
+print(shared.source_digest(project, recipe="native-v3-frozen-sparse"))
+PY
+}

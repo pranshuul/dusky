@@ -4,25 +4,25 @@
     "position": "right",
     "spacing": 0,
     "width": 30, // Slightly wider to fit the numbers comfortably
-    "margin-top": 5,
-    "margin-bottom": 5,
-    "margin-left": 4,
-    "margin-right": 4,
+    "margin-top": 4,
+    "margin-bottom": 4,
+    "margin-left": -3,
+    "margin-right": 2,
     "fixed-center": true,
     "reload_style_on_change": true,
 
     // ===================================================================
     // MODULE LAYOUT
     // ===================================================================
-    "modules-left": [ 
+    "modules-left": [
         "group/clock-drawer"
         //"group/stats"
     ],
-    
-    "modules-center": [ 
+
+    "modules-center": [
         "hyprland/workspaces"
     ],
-    
+
     "modules-right": [
         "group/media-drawer",
         "battery",
@@ -77,7 +77,7 @@
 
     "group/stats": {
         "orientation": "vertical",
-        "modules": [ "cpu", "memory", "temperature" ]
+        "modules": [ "cpu", "memory", "custom/temperature" ]
     },
 
     // ===================================================================
@@ -88,7 +88,7 @@
         //"format": "{name}",
         "format": "",
         "on-click": "activate",
-        "sort-by": "number",
+        "sort-by": "default",
         "persistent-workspaces": {},
         "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'",
         "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'"
@@ -96,6 +96,7 @@
 
     "cpu": {
         "justify": "center",
+        "align": 0.5,
         "format": "\n{usage}",
         "interval": 2,
         "on-click": "dusky-run kitty --class htop -e htop",
@@ -107,6 +108,7 @@
 
     "memory": {
         "justify": "center",
+        "align": 0.5,
         "format": "\n{percentage}",
         "interval": 2,
         "on-click": "dusky-run kitty --class dusky_disk_monitor_io.py -e $HOME/user_scripts/drives/dusky_disk_monitor_io.py",
@@ -116,17 +118,20 @@
         }
     },
 
-    "temperature": {
+    "custom/temperature": {
         "justify": "center",
-        "thermal-zone": 6,
-        "format": "\n{temperatureC}",
-        "critical-threshold": 80,
-        "format-critical": "🔥\n{temperatureC}",
-        "tooltip-format": "Temp: {temperatureC}°C"
+        "align": 0.5,
+        "exec": "\"$HOME/user_scripts/waybar/temperature.sh\" 10 80",
+        "return-type": "json",
+        "format": "{icon}\n{text}",
+        "format-icons": { "default": "", "critical": "🔥" },
+        "hide-empty-text": true,
+        "restart-interval": 5
     },
 
     "clock": {
         "justify": "center",
+        "align": 0.5,
         "format": "{:%I\n%M}",
         "tooltip-format": "<tt>{calendar}</tt>",
         "on-click": "dusky-run gnome-clocks",
@@ -154,10 +159,10 @@
     "custom/notification": {
         "justify": "center",
         "align": 0.5,
-        "tooltip-format": "Left Click: Launch Mako\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
+        "tooltip-format": "{tooltip}\n\nLeft Click: Launch Mako\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
         "format": "{}",
         "return-type": "json",
-        "exec-if": "which makoctl",
+        "exec-if": "command -v makoctl >/dev/null 2>&1",
         "exec": "~/user_scripts/waybar/mako.sh --vertical",
         "interval": 2,
         "on-click": "~/user_scripts/rofi/rofi_mako.sh",
@@ -180,6 +185,7 @@
     "pulseaudio": {
         // Stacked: Icon on top, Volume % below
         "justify": "center",
+        "align": 0.5,
         "format": "{icon}\n{volume}",
         "format-muted": "󰖁",
         "on-click": "dusky-run pavucontrol",
@@ -190,17 +196,15 @@
     "backlight": {
         "justify": "center",
         "align": 0.5,
-        "device": "intel_backlight",
         "format": "{icon}\n{percent}",
         "format-icons": ["","","","","","","","","","","","","","",""],
         "tooltip": true,
         "tooltip-format": "LMB: Brightness Slider\nRMB: hyprsunset Slider\nMMB: Shaders",
-        "on-click": "dusky-run \"$HOME/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py\"",
-        "on-click-right": "dusky-run \"$HOME/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py\"",
+        "on-click": "\"$HOME/.local/bin/dusky_tray\"",
+        "on-click-right": "\"$HOME/.local/bin/dusky_tray\"",
         "on-click-middle": "dusky-run \"$HOME/user_scripts/rofi/shader_menu.sh\"",
         "on-scroll-up": "brightnessctl set +5%",
         "on-scroll-down": "brightnessctl set 5%-",
-        "min-length": 4,
         "interval": 60
     },
 
@@ -217,9 +221,10 @@
 
     "custom/network": {
         "justify": "center",
+        "align": 0.5,
         "return-type": "json",
-        "exec": "$HOME/user_scripts/waybar/network/network_meter_calling.sh --vertical",
-        "interval": 1,
+        "exec": "$HOME/.local/bin/dusky_network watch --vertical",
+        "restart-interval": 3,
         "on-click": "foot --app-id=dusky_tui python $HOME/user_scripts/dusky_tui/python/main/main.py $HOME/user_scripts/network_manager/tui_dusky_network.py",
         "on-click-right": "nmcli radio wifi on",
         "on-click-middle": "nmcli radio wifi off"
@@ -228,6 +233,7 @@
     "battery": {
         // Stacked: Icon on top, Capacity % below
         "justify": "center",
+        "align": 0.5,
         "format": "{icon}\n{capacity}",
         "format-charging": "\n{capacity}",
         "format-icons": ["󰂎", "󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"],
@@ -237,11 +243,12 @@
 
     "custom/power": {
         "justify": "center",
+        "align": 0.5,
         "format": "",
         "tooltip": true,
-        "tooltip-format": "Power Menu\n RMB - Control Center",
+        "tooltip-format": "Power Menu\nLMB: Power Menu\nRMB: Dusky Center",
         "on-click": "dusky-run ~/user_scripts/wlogout/wlogout_scale.sh",
-        "on-click-right": "dusky-run python3 ~/user_scripts/dusky_system/control_center/dusky_control_center.py"
+        "on-click-right": "\"$HOME/.local/bin/dusky_center\""
     },
 
     "custom/inhibit-suspend": {

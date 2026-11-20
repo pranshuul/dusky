@@ -1,128 +1,170 @@
 ---
-title: "Modular Libvirt Daemons — Socket Activation (Aug 2026)"
+title: "Modular libvirt sockets — manual setup"
 tags:
   - kvm
-  - libvirt
-  - systemd
-  - arch
+  - manual
 aliases:
   - Enabling Modular Libvirt Daemons
+reviewed: 2026-10-25
 ---
 
-# Modular Libvirt Daemons — Socket Activation (Aug 2026)
+# Modular libvirt sockets — manual setup
 
-> [!info] Canonical
-> `10_virt_modular_daemon.py` — phases: eradicate monolith → enforce socket activation → drop-ins for real perms → daemon conf (fallback) → `libvirt-guests` → arm + verification. Follow the script for idempotent runs; this note teaches *why*.
+[[+ MOC KVM|KVM home]]
 
-## Why modular
+These instructions target system libvirt on Arch. A socket listens and starts
+its daemon on demand. This can reduce idle daemon residency, but it does not
+promise zero VM overhead or that every daemon immediately exits after use.
+`virtlogd` and `virtlockd` serve running guests and must not be stopped casually.
 
-| Era | Model | Cost |
-|---|---|---|
-| <libvirt 6 | `libvirtd` monolith handles every driver | one giant process, always resident |
-| ≥12.6 (Arch 2026) | per-driver `virt${drv}d` + `virtproxyd` + `virtlogd`/`virtlockd`, **systemd socket-activated** | **0 MB idle** per driver (inactive/dead until first `virsh`/`virt-manager` connect) |
+## 1. Inspect the installed units
 
-Only sockets (`*.socket`) listen; services (`*.service`) wake on demand and auto-idle.
-
-> [!abstract] Drivers
-> - **QEMU/compute:** `virtqemud` — CPU/RAM, the one you care about for VFIO
-> - **Network:** `virtnetworkd` — NAT/bridge, `dnsmasq` + `nftables`
-> - **Node:** `virtnodedevd` — PCIe/USB hostdev
-> - **Storage:** `virtstoraged` — pools/qcow2
-> - **Infra:** `virtinterfaced`, `virtnwfilterd`, `virtsecretd`, `virtproxy` (compat), `virtlogd`, `virtlockd`, `virtlxcd`/`virtvboxd`/`virtchd` (alt hypervisors, idle)
-
-## Step 1 — Eradicate the monolith
-
-```bash
-sudo systemctl stop libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
-sudo systemctl disable libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
-# Never mask if hard-RequiredBy libvirt-guests.service — script checks Requires/Requisite/BindsTo
-sudo systemctl mask libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
-sudo systemctl daemon-reload
-```
-> Expected noise `The unit files have no installation config` / `masked, ignoring` = monolith dead.
-
-## Step 2 — Enable sockets only (never `.service`)
-
-> [!warning] Critical systemd rule
-> Do **not** `enable --now virtqemud.service`. That makes it resident 24/7. Enable **sockets** only.
-
-```bash
-# persist
-for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox; do
-  sudo systemctl enable virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket
-done
-for drv in log lock; do sudo systemctl enable virt${drv}d.socket virt${drv}d-admin.socket; done
-
-# now
-for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox; do
-  sudo systemctl start virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket
-done
-for drv in log lock; do sudo systemctl start virt${drv}d.socket virt${drv}d-admin.socket; done
+```sh
+systemctl list-unit-files 'libvirtd*' 'virt*.socket' 'virt*.service'
+systemctl cat virtqemud.socket
+systemctl cat libvirt-guests.service
 ```
 
-Disable always-on services + TCP/TLS listeners (script does this):
+## 2. Choose the fresh-install or migration route
 
-```bash
-# should be disabled — socket-activated only
-systemctl is-enabled virtqemud.service   # → disabled
-systemctl is-enabled virtqemud-tcp.socket # → masked/disabled
+On a fresh host, continue to socket activation below. A system connection may
+not answer yet because its socket has not been started.
+
+On an existing host, first inspect its current inventory as an administrator:
+
+```sh
+sudo virsh -c qemu:///system list --all
 ```
 
-## Step 3 — Real socket perms (the part most guides get wrong)
+If migrating from the monolithic daemon, gracefully stop guests and back up
+their state. Inspect `Requires=`, `Requisite=` and `BindsTo=` relationships, then
+stop/disable the installed `libvirtd` service and its sockets before activating
+the modular set. Do not mask a dependency still required by `libvirt-guests`,
+and do not run both driver models against the same resources. The supplied
+phase 10 discovers the unit fleet and checks these dependencies.
 
-`libvirtd.conf` / `virtqemud.conf` contain verbatim:
+## 3. Activate the required sockets
 
-> *“This setting is not required or honoured if using systemd socket activation.”* — `unix_sock_group` / `unix_sock_rw_perms` are **inert**.
+Enable only installed sockets needed by QEMU and its supporting drivers:
 
-Real perms come from **systemd drop-ins**:
+```sh
+sudo systemctl enable --now virtqemud.socket virtnetworkd.socket virtstoraged.socket \
+  virtnodedevd.socket virtnwfilterd.socket virtsecretd.socket virtlogd.socket virtlockd.socket
+```
 
-```bash
-sudo mkdir -p /etc/systemd/system/virtqemud.socket.d
-sudo tee /etc/systemd/system/virtqemud.socket.d/10-arsonix.conf <<'EOF'
-# Managed by Arsonix (Phase 2)
+Confirm these units exist in your installed build. `virtproxyd.socket` is useful
+for clients needing the compatibility/proxy endpoint; direct modular clients do
+not require every alternate-hypervisor daemon. Do not blindly enable nonexistent
+`virtvboxd`, LXC or Cloud Hypervisor sockets from an old exhaustive loop.
+
+## Socket permissions and authorization are separate
+
+When socket-activated, socket ownership/mode comes from systemd. Edit the
+appropriate socket drop-in, not only `unix_sock_*` in daemon configuration:
+
+```ini
+# sudo systemctl edit virtqemud.socket
 [Socket]
 SocketUser=root
 SocketGroup=libvirt
 SocketMode=0660
-EOF
-sudo tee /etc/systemd/system/virtqemud-ro.socket.d/10-arsonix.conf <<'EOF'
-[Socket]
-SocketUser=root
-SocketGroup=libvirt
-SocketMode=0666
-EOF
+```
+
+Apply equivalent RW-socket policy to the supporting drivers your users manage.
+Keep admin sockets root-only unless deliberately choosing another policy.
+This manual example uses mode 0660 with libvirt-group socket access. The script
+uses mode 0666 for regular sockets, then authorizes API access through polkit
+(and its rule accepts libvirt or wheel). Those are deliberate access-policy
+choices, not identical settings. In either case, socket access does not replace
+API authorization; keep `auth_unix_rw="polkit"` in the applicable daemon config.
+
+```sh
 sudo systemctl daemon-reload
-sudo systemctl restart virtqemud.socket virtqemud-ro.socket
-ls -l /run/libvirt/virtqemud-sock*  # srwxrwx---  root libvirt  0660  ← fact on disk
+# With no clients/guests depending on the sockets being reconfigured:
+sudo systemctl restart virtqemud.socket
+ls -l /run/libvirt/virtqemud-sock
 ```
 
-The pipeline also writes inert `virtqemud.conf` values (`unix_sock_group="libvirt"` etc.) for manual `--listen` fallback, plus `firewall_backend="nftables"` in `network.conf` and `libvirt-guests` (`URIS='qemu:///system' ON_BOOT=start … SYNC_TIME=1`).
+Polkit authorizes API access after the filesystem socket check. See
+[[Give the User System-Wide Permission]] for that separate step. This is the
+same distinction encoded by `10_virt_modular_daemon.py`, which also configures
+`firewall_backend="nftables"` in `/etc/libvirt/network.conf`.
 
-## Step 4 — Graceful shutdown
+## NAT firewall backend
 
-```bash
+Before starting libvirt NAT networks, edit `/etc/libvirt/network.conf` with
+`sudoedit` and set its existing `firewall_backend` assignment to the following
+value, matching phase 10. Do not add a second conflicting assignment:
+
+```ini
+firewall_backend = "nftables"
+```
+
+This is a daemon setting, not an instruction to enable the standalone
+`nftables.service` or replace the host ruleset. If virtnetworkd is already
+running, it needs a controlled restart to read a changed config. Make that
+transition with affected guests/networks stopped; the fresh-host route sets
+this before the first network start.
+
+## Guest lifecycle at host shutdown
+
+`libvirt-guests.service` coordinates configured shutdown/start actions; read
+its installed EnvironmentFile path with `systemctl cat` rather than guessing
+between `/etc/conf.d/` and `/etc/sysconfig/`. Choose shutdown versus managed-save
+according to the actual guest devices and shared-filesystem support. A saved
+RAM state is not a disk backup, and nothing preserves host tmpfs through reboot.
+
+For this Windows/VFIO/VirtIO-FS route, use graceful shutdown rather than relying
+on managed-save support. The installed Arch unit inspected for these notes
+reads `/etc/conf.d/libvirt-guests`; use the path shown by your own unit. Edit
+that file with `sudoedit`, preserving unrelated settings and replacing matching
+assignments rather than appending duplicates. These file contents match the
+script's lifecycle policy:
+
+```conf
+URIS='qemu:///system'
+ON_BOOT=start
+ON_SHUTDOWN=shutdown
+SHUTDOWN_TIMEOUT=120
+PARALLEL_SHUTDOWN=4
+START_DELAY=0
+SYNC_TIME=1
+```
+
+Choose a shutdown timeout sufficient for your guests. `ON_BOOT=start` can restart
+all guests recorded as running at host shutdown, even if their individual
+autostart flag is off. Choose `ON_BOOT=ignore` if you do not want that resume
+behavior; guest autostart is a separate setting. Ensure encrypted/external/RAM
+mounts and needed directory contents are ready before enabling automatic starts.
+`SYNC_TIME=1` uses supported guest-agent time sync on resume; it is not required
+for display or ordinary Windows timekeeping.
+
+After choosing that policy, arm it for the next host shutdown:
+
+```sh
 sudo systemctl enable --now libvirt-guests.service
-# /etc/conf.d/libvirt-guests → URIS='qemu:///system' ON_BOOT=start ON_SHUTDOWN=shutdown SHUTDOWN_TIMEOUT=120
+systemctl status libvirt-guests.service --no-pager
 ```
 
-## Step 5 — Verify
+On an existing host, starting this service can perform its selected boot action;
+inspect its state/recorded guests first. Enabling sockets alone does not arm
+this guest-shutdown policy. Reference:
+[libvirt-guests lifecycle variables](https://libvirt.org/manpages/libvirt-guests.html).
 
-```bash
-systemctl list-sockets | grep virt        # LISTEN
-systemctl status virtqemud.service        # inactive (dead) = 0 MB idle — correct
-virsh -c qemu:///system version           # wakes to active, self-terminates after idle timeout
-sudo virsh -c qemu:///system -q uri       # root OK
-sudo -u $USER virsh -c qemu:///system -q uri  # operator OK only after re-login (libvirt group)
+## Verify
+
+```sh
+systemctl is-active virtqemud.socket virtnetworkd.socket
+sudo virsh -c qemu:///system version
+sudo virsh -c qemu:///system list --all
+systemctl status virtqemud.service --no-pager
 ```
 
-## Undo (to monolith)
+These initial queries use sudo because regular-user access is the next step.
+Repeat them without sudo after that access is configured; everyday GUI/VM use
+should run as the desktop user. An active service after a query is normal. Source:
+[libvirt daemons and systemd activation](https://libvirt.org/daemons.html).
 
-```bash
-for drv in qemu interface network nodedev nwfilter secret storage proxy lxc ch vbox log lock; do
-  sudo systemctl stop virt${drv}d.service virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket 2>/dev/null || true
-  sudo systemctl disable virt${drv}d.socket virt${drv}d-ro.socket virt${drv}d-admin.socket 2>/dev/null || true
-done
-sudo systemctl unmask libvirtd.service libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tcp.socket libvirtd-tls.socket
-```
+---
 
-See: [[KVM Services]] (legacy retained), [[All Libvert Daemons]], `10_virt_modular_daemon.py`.
+Previous: [[Verify VT-x and Kernel Modules and IOMMU]]. Continue: [[Give the User System-Wide Permission]].

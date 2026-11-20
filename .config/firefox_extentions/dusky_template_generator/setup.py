@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Dusky Template Generator — installer (Python 3.14+, Linux only).
+"""Dusky Template Generator — installer (Python 3.15+, Linux only).
 
-Registers host/dusky_template_host.py as the native messaging host
+Registers host/dusky_template_host.py directly as the native messaging host
 "dusky_template_generator" for every Gecko browser profile root found, creates
 $XDG_CONFIG_HOME/dusky_sites, and runs the host's own selftest.
 
@@ -10,8 +10,10 @@ $XDG_CONFIG_HOME/dusky_sites, and runs the host's own selftest.
     python3 setup.py --remove   uninstall the manifests
 """
 
+import argparse
 import json
 import os
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -57,16 +59,36 @@ def config_dir() -> Path:
     return Path(base) / "dusky_sites"
 
 
+def probe() -> None:
+    payload = json.dumps({"type": "ping", "__id": 1}).encode("utf-8")
+    result = subprocess.run(
+        [str(HOST_PY)], input=struct.pack("=I", len(payload)) + payload,
+        capture_output=True, timeout=10, check=True,
+    )
+    if len(result.stdout) < 4:
+        raise ValueError("native host returned no framed reply")
+    length, = struct.unpack("=I", result.stdout[:4])
+    reply = json.loads(result.stdout[4:])
+    if length != len(result.stdout) - 4 or not reply.get("ok") or reply.get("__id") != 1:
+        raise ValueError("native host returned an invalid ping reply")
+    print(f"   host ping OK — Python {reply['python']}, host {reply['version']}")
+
+
 def install() -> int:
     if not HOST_PY.is_file():
         print(f"!! missing {HOST_PY}", file=sys.stderr)
         return 1
     HOST_PY.chmod(0o755)
 
-    # Stale manifests shipped next to the host confuse nothing but the user.
-    for junk in (HERE / "host").glob("*.json"):
-        junk.unlink()
-        print(f"   removed stale {junk}")
+    print("   running host selftest …", flush=True)
+    rc = subprocess.run([str(HOST_PY), "--selftest"], check=False).returncode
+    if rc:
+        print("!! selftest FAILED", file=sys.stderr)
+        return rc
+
+    store = config_dir()
+    store.mkdir(parents=True, exist_ok=True, mode=0o700)
+    probe()
 
     payload = json.dumps(manifest(), indent=2) + "\n"
     for dest in targets(existing_only=True):
@@ -75,15 +97,10 @@ def install() -> int:
         dest.chmod(0o644)
         print(f"   registered {dest}")
 
-    store = config_dir()
-    store.mkdir(parents=True, exist_ok=True, mode=0o700)
-    print(f"   templates  {store}")
+    # Remove the obsolete pinned-interpreter wrapper after replacing manifests.
+    (store / ".native-host").unlink(missing_ok=True)
 
-    print("   running host selftest …")
-    rc = subprocess.run([sys.executable, str(HOST_PY), "--selftest"], check=False).returncode
-    if rc:
-        print("!! selftest FAILED", file=sys.stderr)
-        return rc
+    print(f"   templates  {store}")
     print("\nDone. Reload the extension in about:debugging (or restart the browser).")
     return 0
 
@@ -93,6 +110,7 @@ def remove() -> int:
         if dest.exists():
             dest.unlink()
             print(f"   removed {dest}")
+    (config_dir() / ".native-host").unlink(missing_ok=True)
     print("Templates in", config_dir(), "were left untouched.")
     return 0
 
@@ -104,15 +122,35 @@ def check() -> int:
             print(f"   MISSING  {dest}")
             bad = 1
             continue
-        data = json.loads(dest.read_text(encoding="utf-8"))
-        good = data.get("path") == str(HOST_PY) and EXT_ID in data.get("allowed_extensions", [])
+        try:
+            data = json.loads(dest.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"   INVALID  {dest}: {exc}")
+            bad = 1
+            continue
+        expected = manifest()
+        good = isinstance(data, dict) and all(
+            data.get(key) == expected[key]
+            for key in ("name", "path", "type", "allowed_extensions")
+        )
         print(f"   {'OK      ' if good else 'STALE   '} {dest}")
         bad |= 0 if good else 1
     print(f"   host     {HOST_PY} {'(executable)' if os.access(HOST_PY, os.X_OK) else '(NOT executable)'}")
     print(f"   store    {config_dir()} {'exists' if config_dir().is_dir() else 'MISSING'}")
-    return bad
+    try:
+        probe()
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"   FAILED   native host: {exc}")
+        bad = 1
+    return bad or int(not HOST_PY.is_file() or not os.access(HOST_PY, os.X_OK))
 
 
 if __name__ == "__main__":
-    arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    raise SystemExit(remove() if arg == "--remove" else check() if arg == "--check" else install())
+    if sys.version_info < (3, 15):
+        raise SystemExit("Python 3.15+ is required. Run setup.py with the ISO's Python 3.15 interpreter.")
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="report status only")
+    mode.add_argument("--remove", action="store_true", help="uninstall host manifests")
+    args = parser.parse_args()
+    raise SystemExit(remove() if args.remove else check() if args.check else install())

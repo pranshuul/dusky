@@ -1,5 +1,5 @@
 /*
- * Dusky Template Generator — popup.js (ES module, Gecko 156+)
+ * Dusky Template Generator — popup.js (ES module, Gecko 157.0.1+)
  *
  * A view over exactly one file: $XDG_CONFIG_HOME/dusky_sites/<domain>.css
  *   open      → read from disk (disk is the only source of truth)
@@ -9,32 +9,39 @@
  *   Reload    → discard local edits, re-read disk
  *   Copy / Delete
  *
- * Every mutating call carries base_rev, so a write can never silently overwrite
- * a change made by the picker (or by your editor) since this popup last read.
+ * Mutating calls carry base_rev, except an explicitly confirmed overwrite,
+ * so an ordinary write cannot replace a change since this popup last read.
  * Every mutating call also carries an opaque `origin` nonce which the broker
  * echoes in "dusky:changed", so this view can tell its own writes from foreign
  * ones without the (ambiguous) rev comparison v3 used.
  */
 "use strict";
 
+const theme = globalThis.__duskyTemplateTheme;
+const themeStyle = document.createElement("style");
+themeStyle.textContent = theme.css;
+document.head.append(themeStyle);
+theme.apply(document.documentElement);
+
 const $ = (id) => document.getElementById(id);
 const ui = {
   domain: $("domain"), css: $("css"), path: $("path"), status: $("status"),
-  auto: $("auto"), pick: $("pick"), save: $("save"),
-  copy: $("copy"), reload: $("reload"), del: $("delete"),
+  auto: $("auto"), pick: $("pick"), save: $("save"), vars: $("vars"),
+  audit: $("audit"), copy: $("copy"), reload: $("reload"), del: $("delete"),
 };
-const BUTTONS = [ui.auto, ui.pick, ui.save, ui.copy, ui.reload, ui.del];
+const BUTTONS = [ui.auto, ui.pick, ui.save, ui.vars, ui.audit, ui.copy, ui.reload, ui.del];
 const ORIGIN = crypto.randomUUID();
 
 const view = {
   tab: null, domain: "", saved: "", exists: false, path: "", rev: 0,
-  pickerOn: false, delArm: 0, autoArm: 0, force: false, timer: 0, ready: false,
+  busy: false, pickerOn: false, delArm: 0, autoArm: 0, delTimer: 0, autoTimer: 0,
+  force: false, timer: 0, ready: false, docEpoch: 0, palette: {},
 };
 
 function domainOf(url) {
   const u = URL.parse(url ?? "");
   if (!u || (u.protocol !== "https:" && u.protocol !== "http:")) return "";
-  return u.hostname.replace(/^www\./, "");
+  return u.hostname.replace(/^www\./, "").replace(/\.$/, "");
 }
 const fileName = () => `${view.domain}.css`;
 const shortPath = (p) => String(p ?? "").replace(/^\/home\/[^/]+(?=\/)/, "~");
@@ -43,6 +50,18 @@ const dirty = () => ui.css.value !== view.saved;
 function label(btn, title, sub) {
   btn.querySelector(".t").textContent = title;
   if (sub !== undefined) btn.querySelector(".s").textContent = sub;
+}
+
+function disarmAuto() {
+  clearTimeout(view.autoTimer);
+  view.autoTimer = view.autoArm = 0;
+  label(ui.auto, "⚡ Auto-map", "scan this site's colour tokens");
+}
+
+function disarmDelete() {
+  clearTimeout(view.delTimer);
+  view.delTimer = view.delArm = 0;
+  label(ui.del, "🗑 Delete", "remove this file from disk");
 }
 
 function say(text, kind = "") {
@@ -66,12 +85,16 @@ const pg = (msg) => bg({ type: "page", tabId: view.tab.id, msg });
 
 function setDoc(reply, keepDirty = false) {
   const wasDirty = dirty();
+  const changed = (reply.rev ?? 0) !== view.rev;
+  const conflict = keepDirty && wasDirty && (view.force || changed);
+  if (changed) disarmDelete();
+  view.docEpoch++;
   view.saved = reply.css ?? "";
   view.exists = !!reply.exists;
   view.rev = reply.rev ?? 0;
-  view.force = false;
   if (reply.path) view.path = reply.path;
   if (!(keepDirty && wasDirty)) ui.css.value = view.saved;
+  view.force = conflict && dirty();
   refresh();
 }
 
@@ -95,22 +118,31 @@ function refresh() {
   label(ui.pick,
     view.pickerOn ? "■ Stop picking" : "🎯 Pick elements",
     view.pickerOn ? "picker is running on this page" : "click things on the page, assign a role");
+  if (view.busy || !view.ready) for (const b of BUTTONS) b.disabled = true;
 }
 
 function busy(on) {
+  ui.css.disabled = on;
   for (const b of BUTTONS) b.disabled = on;
   if (!on) refresh();
 }
 
 async function run(task) {
+  if (view.busy || !view.ready) return;
+  view.busy = true;
+  view.docEpoch++;
   busy(true);
   try { await task(); }
   catch (err) { say(err.message ?? String(err), "err"); }
-  finally { busy(false); }
+  finally {
+    view.busy = false; busy(false);
+    if (syncPending) void syncFromDisk();
+  }
 }
 
 async function save() {
-  const req = { type: "write", domain: view.domain, css: ui.css.value, tabId: view.tab.id };
+  const submitted = ui.css.value;
+  const req = { type: "write", domain: view.domain, css: submitted, tabId: view.tab.id };
   if (!view.force) req.base_rev = view.rev;
   const reply = await bg(req, true);
   if (reply.conflict) {
@@ -120,13 +152,17 @@ async function save() {
     say("The file changed on disk (picker, or another editor). Click Overwrite to replace it, or ↻ Reload to see it.", "warn");
     return false;
   }
-  setDoc(reply);
+  setDoc(reply, ui.css.value !== submitted);
   say(reply.exists ? `Saved ${fileName()}` : "Template was empty — file removed", "ok");
   return true;
 }
 
 async function flushEdits() {
-  if (!dirty() && !view.force) return true;
+  if (view.force) {
+    say("Resolve the disk conflict with Overwrite or Reload first.", "warn");
+    return false;
+  }
+  if (!dirty()) return true;
   return save();
 }
 
@@ -158,21 +194,72 @@ ui.auto.addEventListener("click", () => run(async () => {
     return;
   }
   if (scan.kind === "structural" && Date.now() - view.autoArm > 6000) {
+    clearTimeout(view.autoTimer);
     view.autoArm = Date.now();
     label(ui.auto, "⚡ Confirm Auto-map", "applies the broad structural theme");
-    setTimeout(() => {
-      view.autoArm = 0;
-      label(ui.auto, "⚡ Auto-map", "scan this site's colour tokens");
-    }, 6000);
+    view.autoTimer = setTimeout(disarmAuto, 6000);
     say(`${view.domain} exposes no usable colour tokens (${scan.found} found). Auto-map would install a broad ` +
       "structural theme that repaints nearly every element. Click again within 6 s to apply it.", "warn");
     return;
   }
-  view.autoArm = 0;
-  label(ui.auto, "⚡ Auto-map", "scan this site's colour tokens");
+  disarmAuto();
   await spliceRegion("auto", scan.body);
   const how = scan.kind === "structural" ? "structural theme" : `${scan.mapped} of ${scan.found} tokens`;
   say(`Mapped ${how} → saved ${fileName()}${scan.palette ? "" : "  (palette variables not visible on this page)"}`, "ok");
+}));
+
+/* ── Export every CSS variable ───────────────────────────────────────── */
+ui.vars.addEventListener("click", () => run(async () => {
+  say("Collecting every CSS custom property…", "busy");
+  const dump = await pg({ type: "dumpVariables" });
+  if (!dump?.ok) throw new Error(dump?.error ?? "Variable dump failed");
+  let text = dump.chunk ?? "";
+  while (!dump.done) {
+    const next = await pg({ type: "dumpVariablesChunk", id: dump.id, offset: text.length });
+    if (!next?.ok) throw new Error(next?.error ?? "Variable dump could not be completed");
+    if (!next.chunk) throw new Error("The variable report ended unexpectedly");
+    text += next.chunk;
+    dump.done = next.done;
+    if (text.length > next.total) throw new Error("The variable report was inconsistent");
+  }
+  const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = dump.filename || "css-variables.md";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  const copied = await navigator.clipboard.writeText(text).then(() => true, () => false);
+  say(`Exported ${dump.count} variables (${dump.definitions} definitions, ` +
+    `${Math.ceil(text.length / 1024)} KiB) — downloaded${copied ? " and copied" : ""}` +
+    `${dump.truncated ? " — truncated" : ""}`, "ok");
+}));
+
+/* ── Audit page ───────────────────────────────────────────────────────── */
+ui.audit.addEventListener("click", () => run(async () => {
+  say("Auditing visible elements against the palette…", "busy");
+  const report = await pg({ type: "audit", palette: view.palette });
+  if (!report?.ok) throw new Error(report?.error ?? "Audit failed");
+  const text = report.text ?? "";
+  const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `audit-${view.domain || "page"}.md`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  const copied = await navigator.clipboard.writeText(text).then(() => true, () => false);
+  const findings = report.issues ?? 0;
+  say(findings
+    ? `Audit: ${findings} finding${findings === 1 ? "" : "s"} on ${report.textCount ?? 0} text ` +
+      `element${report.textCount === 1 ? "" : "s"} — outlined on page, ` +
+      `report ${copied ? "copied and downloaded" : "downloaded"}.`
+    : `Audit: no problems found in ${report.textCount ?? 0} text elements.`,
+  findings ? "warn" : "ok");
 }));
 
 /* ── Picker ───────────────────────────────────────────────────────────── */
@@ -203,18 +290,21 @@ ui.copy.addEventListener("click", () => run(async () => {
 
 ui.del.addEventListener("click", () => run(async () => {
   if (Date.now() - view.delArm > 3000) {
+    clearTimeout(view.delTimer);
     view.delArm = Date.now();
     label(ui.del, "🗑 Confirm delete", "click again to remove the file");
     say(`Click again within 3 s to delete ${fileName()} from disk.`, "warn");
-    setTimeout(() => {
-      view.delArm = 0;
-      label(ui.del, "🗑 Delete", "remove this file from disk");
-    }, 3000);
+    view.delTimer = setTimeout(disarmDelete, 3000);
     return;
   }
-  view.delArm = 0;
-  label(ui.del, "🗑 Delete", "remove this file from disk");
-  setDoc(await bg({ type: "delete", domain: view.domain, base_rev: view.rev, tabId: view.tab.id }, true));
+  disarmDelete();
+  const reply = await bg({ type: "delete", domain: view.domain, base_rev: view.rev, tabId: view.tab.id }, true);
+  if (reply.conflict) {
+    setDoc(reply, true);
+    say("The file changed on disk. Review it and click Delete again to confirm.", "warn");
+    return;
+  }
+  setDoc(reply);
   say(`Deleted ${fileName()}`, "ok");
 }));
 
@@ -227,19 +317,38 @@ document.addEventListener("keydown", (e) => {
 });
 
 /* ── Live sync: the background announces every successful mutation ────── */
+let syncPending = false, syncRunning = false;
+async function syncFromDisk() {
+  syncPending = true;
+  if (view.busy || syncRunning) return;
+  syncRunning = true;
+  try {
+    while (syncPending && !view.busy) {
+      syncPending = false;
+      const epoch = view.docEpoch;
+      const reply = await readDisk();
+      // A local operation started while this snapshot was in flight. Read
+      // again after it finishes rather than rewinding a successful save.
+      if (epoch !== view.docEpoch || view.busy) { syncPending = true; continue; }
+      setDoc(reply, true);
+      if (view.force) say("The file changed on disk. Your unsaved edits are kept — Overwrite replaces it, ↻ Reload discards your edits.", "warn");
+      else say("Updated from disk", "ok");
+    }
+  } catch (err) { say(err.message ?? String(err), "err"); }
+  finally { syncRunning = false; }
+}
 browser.runtime.onMessage.addListener((msg) => {
   if (msg?.type !== "dusky:changed" || msg.domain !== view.domain || !view.ready) return;
-  if (msg.origin === ORIGIN) return;                       /* our own write */
-  readDisk().then((reply) => {
-    const wasDirty = dirty();
-    setDoc(reply, true);
-    if (wasDirty) say("The file changed on disk. Your unsaved edits are kept — Save overwrites, ↻ Reload discards.", "warn");
-    else say("Updated from disk", "ok");
-  }).catch(() => {});
+  if (msg.origin !== ORIGIN) void syncFromDisk();
 });
 
 /* ── Init ─────────────────────────────────────────────────────────────── */
 (async function init() {
+  void bg({ type: "palette" }).then((reply) => {
+    view.palette = reply.colors ?? {};
+    theme.apply(document.documentElement, view.palette);
+  }).catch(() => {}); // Neutral, readable defaults remain available when the host is offline.
+  busy(true);
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   view.tab = tab;
   view.domain = domainOf(tab?.url);
@@ -272,5 +381,8 @@ browser.runtime.onMessage.addListener((msg) => {
    * picker state is correct even on a freshly loaded tab. */
   const state = await pg({ type: "ping" }).catch(() => null);
   view.pickerOn = !!state?.active;
-  refresh();
-})();
+  busy(false);
+})().catch((err) => {
+  say(err.message ?? String(err), "err");
+  for (const b of BUTTONS) b.disabled = true;
+});

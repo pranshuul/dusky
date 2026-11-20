@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-import os
 import re
-import json
-import tempfile
-import threading
-from pathlib import Path
-from typing import Any
+lazy import json
+lazy import threading
+lazy from pathlib import Path
+lazy from typing import Any
 
 from python.frontend.core_types import BaseEngine
+from python.shared.config_io import atomic_write, read_text
+
+_RE_JSONC_COMMENTS = re.compile(r'("(?:\\.|[^"\\])*")|//[^\r\n]*|/\*.*?\*/', re.DOTALL)
+_RE_JSONC_TRAILING_COMMAS = re.compile(r'("(?:\\.|[^"\\])*")|,\s*(?=[}\]])')
 
 class JsonEngine(BaseEngine):
     """
@@ -18,7 +20,7 @@ class JsonEngine(BaseEngine):
     - Recursive nested dictionary flattening for O(1) TUI scope & key lookups.
     - Deep nested dictionary insertion & mutation for scoped keys (e.g. scope='display', key='border').
     - Atomic crash-proof file writes via temporary file replacement + fsync.
-    - Thread-safe operations with re-entrant locking.
+    - Thread-safe loading and writes.
     """
 
     def __init__(self, config_path: str = ""):
@@ -26,6 +28,8 @@ class JsonEngine(BaseEngine):
         self.cache: dict[str, Any] = {}
         self.file_mtime_ns: int = 0
         self._lock = threading.Lock()
+        self._snapshot = None
+        self._loaded = False
 
     @property
     def target_path(self) -> str:
@@ -34,25 +38,34 @@ class JsonEngine(BaseEngine):
     @staticmethod
     def _strip_json_comments(text: str) -> str:
         """Strips single-line // comments, block /* */ comments, and trailing commas from JSON/JSONC."""
-        pattern = r"(\"(?:\\\\.|[^\"\\\\])*\")|//.*?$|/\*.*?\*/"
-        def replace(match):
-            if match.group(1):
-                return match.group(1) # Preserve string literals
-            return ""
-        clean = re.sub(pattern, replace, text, flags=re.DOTALL | re.MULTILINE)
-        clean = re.sub(r",\s*([\]}])", r"\1", clean)
-        return clean
+        # Match strings before comments or commas so their contents stay intact.
+        # Whitespace prevents a comment from joining otherwise invalid tokens.
+        clean = _RE_JSONC_COMMENTS.sub(lambda match: match.group(1) or " ", text)
+        return _RE_JSONC_TRAILING_COMMAS.sub(lambda match: match.group(1) or "", clean)
+
+    @staticmethod
+    def _state(data):
+        cache = {}
+        def flatten(mapping, dotted='', slash=''):
+            for key, value in mapping.items():
+                full = f'{dotted}.{key}' if dotted else key
+                qualified = f'{slash}/{key}' if slash else key
+                for alias in (full, qualified, key):
+                    cache.setdefault(alias, value)
+                if isinstance(value, dict):
+                    flatten(value, full, qualified)
+        flatten(data)
+        return cache
 
     def load_state(self) -> dict[str, Any]:
         with self._lock:
             self.cache = {}
-            if not self.config_path.exists():
-                return self.cache
+            self._loaded = False
 
             try:
-                with open(self.config_path, "r", encoding="utf-8") as f:
-                    self.file_mtime_ns = os.fstat(f.fileno()).st_mtime_ns
-                    content = f.read()
+                content, self._snapshot = read_text(self.config_path)
+                self._loaded = True
+                self.file_mtime_ns = self._snapshot[3] if self._snapshot else 0
 
                 if not content.strip():
                     return self.cache
@@ -66,25 +79,7 @@ class JsonEngine(BaseEngine):
                 if not isinstance(data, dict):
                     return self.cache
 
-                # Flatten nested state into scope.key, scope/key, and unique key entries
-                def _flatten(d: dict, prefix: str = ""):
-                    for k, v in d.items():
-                        full_key = f"{prefix}.{k}" if prefix else k
-                        slash_key = f"{prefix}/{k}" if prefix else k
-
-                        if full_key not in self.cache:
-                            self.cache[full_key] = v
-                        if slash_key not in self.cache:
-                            self.cache[slash_key] = v
-
-                        # Store bare key if unique or first encountered
-                        if k not in self.cache:
-                            self.cache[k] = v
-
-                        if isinstance(v, dict):
-                            _flatten(v, full_key)
-
-                _flatten(data)
+                self.cache = self._state(data)
 
             except Exception as e:
                 print(f"[JsonEngine] Failed to read JSON/JSONC config ({self.config_path.name}): {e}")
@@ -100,25 +95,25 @@ class JsonEngine(BaseEngine):
 
         with self._lock:
             data = {}
-            if self.config_path.exists():
-                try:
-                    with open(self.config_path, "r", encoding="utf-8") as f:
-                        self.file_mtime_ns = os.fstat(f.fileno()).st_mtime_ns
-                        content = f.read()
-
-                    if content.strip():
-                        try:
-                            data = json.loads(content)
-                        except json.JSONDecodeError:
-                            data = json.loads(self._strip_json_comments(content))
-                except Exception:
-                    data = {}
+            try:
+                content, snapshot = read_text(self.config_path)
+                if self._loaded and snapshot != self._snapshot:
+                    return False, 'Configuration modified externally. Reload required.', ''
+                if content.strip():
+                    try:
+                        data = json.loads(content)
+                    except json.JSONDecodeError:
+                        data = json.loads(self._strip_json_comments(content))
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError) as exc:
+                return False, f"Refusing to write: Cannot read target JSON/JSONC ({exc}).", ""
 
             if not isinstance(data, dict):
-                data = {}
+                return False, "Refusing to write: Target JSON must contain an object.", ""
 
             for key, scope, val, itype in changes:
-                if val is None or val == "nil":
+                if val is None or val in ("nil", "__DELETE__"):
                     parsed_val = None
                 elif itype == "bool":
                     if isinstance(val, str):
@@ -127,9 +122,15 @@ class JsonEngine(BaseEngine):
                         parsed_val = bool(val)
                 elif itype in ("int", "float"):
                     try:
-                        parsed_val = float(val) if itype == "float" else int(float(val))
-                    except (ValueError, TypeError):
-                        continue
+                        if itype == "float":
+                            parsed_val = float(val)
+                        else:
+                            try:
+                                parsed_val = int(val)
+                            except (ValueError, TypeError):
+                                parsed_val = int(float(val))
+                    except (ValueError, TypeError, OverflowError) as exc:
+                        return False, f"Invalid {itype} value for {scope}.{key}: {exc}", ""
                 elif isinstance(val, str) and ((val.startswith("[") and val.endswith("]")) or (val.startswith("{") and val.endswith("}"))):
                     try:
                         parsed_val = json.loads(val)
@@ -141,55 +142,37 @@ class JsonEngine(BaseEngine):
                 # Determine nested dict path
                 path_parts = []
                 if scope and scope != "DEFAULT":
-                    path_parts.extend(scope.replace("/", ".").split("."))
+                    path_parts.extend((scope.split("/") if "/" in scope else scope.split(".")))
 
-                if "." in key:
-                    path_parts.extend(key.split("."))
-                else:
-                    path_parts.append(key)
+                path_parts.extend(key.split("/") if "/" in key else key.split("."))
+
+                if any(not part for part in path_parts):
+                    return False, f"Invalid JSON path: {scope}/{key}", ""
 
                 # Traverse/instantiate nested dictionary hierarchy
                 curr = data
                 for part in path_parts[:-1]:
-                    if part not in curr or not isinstance(curr[part], dict):
-                        curr[part] = {}
-                    curr = curr[part]
+                    if parsed_val is None and part not in curr:
+                        curr = None
+                        break
+                    curr = curr.setdefault(part, {})
+                    if not isinstance(curr, dict):
+                        return False, f"Cannot write {scope}.{key}: {part!r} is not a JSON object.", ""
 
+                if curr is None:
+                    continue
                 target_prop = path_parts[-1]
                 if parsed_val is None:
                     curr.pop(target_prop, None)
                 else:
                     curr[target_prop] = parsed_val
 
-            # Atomic Crash-Proof Disk Commit
             try:
-                parent_dir = self.config_path.parent
-                parent_dir.mkdir(parents=True, exist_ok=True)
-
-                tmp_file = tempfile.NamedTemporaryFile("w", dir=parent_dir, delete=False, encoding="utf-8")
-                tmp_path = Path(tmp_file.name)
-
-                json.dump(data, tmp_file, indent=4, ensure_ascii=False)
-                tmp_file.flush()
-                os.fsync(tmp_file.fileno())
-                tmp_file.close()
-
-                if self.config_path.exists():
-                    try:
-                        mode = self.config_path.stat().st_mode
-                        os.chmod(tmp_path, mode)
-                    except Exception:
-                        pass
-
-                os.replace(tmp_path, self.config_path)
-                self.file_mtime_ns = os.stat(self.config_path).st_mtime_ns
-
-            except Exception as e:
-                if "tmp_path" in locals() and tmp_path.exists():
-                    try:
-                        tmp_path.unlink()
-                    except Exception:
-                        pass
-                return False, f"Failed to write json: {e}", ""
-
-            return True, f"Successfully saved {len(changes)} changes.", ""
+                formatted = json.dumps(data, indent=4, ensure_ascii=False, allow_nan=False) + '\n'
+                self._snapshot = atomic_write(self.config_path, formatted, snapshot) if formatted != content else snapshot
+                self._loaded = True
+                self.file_mtime_ns = self._snapshot[3] if self._snapshot else 0
+                self.cache = self._state(data)
+            except (OSError, UnicodeError, ValueError, TypeError) as exc:
+                return False, f'Failed to write JSON: {exc}', ''
+            return True, f'Successfully saved {len(changes)} changes.', ''

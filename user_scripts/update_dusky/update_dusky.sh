@@ -80,7 +80,7 @@
 #     "S | 050_pacman_config.sh --auto --force"
 #
 #  4. User script that is ALLOWED TO FAIL (won't stop the updater):
-#     "U | ignore-fail | 150_wallpapers_download.sh --quiet"
+#     "U | ignore-fail | 146_wallpapers_download.sh --quiet"
 #
 #  5. Sudo script allowed to fail:
 #     "S | ignore-fail | 085_warp.py --connect"
@@ -153,7 +153,7 @@ declare -a SCRIPT_SEARCH_DIRS=(
     "${WORK_TREE}/user_scripts/misc_extra"
     "${WORK_TREE}/user_scripts/misc_extra/delete_in_3_weeks"
     "${WORK_TREE}/user_scripts/update_dusky/update_checker"
-    "${WORK_TREE}/user_scripts/dusky_system/reload_cc"
+    "${WORK_TREE}/user_scripts/dusky/reload_cc"
     "${WORK_TREE}/user_scripts/services"
     "${WORK_TREE}/user_scripts/update_dusky"
     "${WORK_TREE}/user_scripts/rofi"
@@ -233,7 +233,7 @@ declare -ra UPDATE_SEQUENCE=(
 #    "U | 137_snapper_isolation_subvolume.sh --auto"
 #    "U | 140_dusky_font_configurator.py"
     "U | 145_matugen_directories.py"
-#    "U | 150_wallpapers_download.sh"
+#    "U | 146_wallpapers_download.sh"
 #    "U | 155_blur_shadow_opacity.sh"
 #    "U | ignore-fail | 160_theme_ctl.py"
 #    "U | 165_qtct_config.sh"

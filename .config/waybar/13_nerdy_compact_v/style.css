@@ -1,16 +1,15 @@
 /*
  * ~/.config/waybar/style.css
- * Precision Vertical Layout - Width 10 (Strict) - Numbered Workspaces & Adaptive Network
+ * Compact Vertical Layout - Centered Modules & Adaptive Network
  */
 
-@import url("../../.config/matugen/generated/waybar-colors.css");
+@import url("../matugen/generated/waybar-colors.css");
 
 /* ─────────────────────────────────────────────────────────────────────────────
    TRANSLUCENCY CONTROLS (GLASSY MODE)
    Tweak the decimals (0.0 to 1.0) here to adjust granular glassiness.
    ───────────────────────────────────────────────────────────────────────────── */
 @define-color glass_bar         alpha(@background, 0.55);
-@define-color glass_group       alpha(@surface_container_highest, 0.55);
 @define-color glass_module      alpha(@surface_container_highest, 0.55);
 @define-color glass_tooltip     alpha(@surface_container, 0.55);
 @define-color glass_active_ws   alpha(@primary, 0.55);
@@ -24,7 +23,6 @@
 /* WAYBAR_OPAQUE_SWITCH_START
 
 @define-color glass_bar         @background;
-@define-color glass_group       @surface_container_highest;
 @define-color glass_module      @surface_container_highest;
 @define-color glass_tooltip     @surface_container;
 @define-color glass_active_ws   @primary_container;
@@ -41,7 +39,7 @@ WAYBAR_OPAQUE_SWITCH_END */
     font-family: "JetBrainsMono Nerd Font Propo", "JetBrainsMono Nerd Font", sans-serif;
     font-size: 10px;
     font-weight: 600;
-    font-feature-settings: "tnum"; 
+    font-feature-settings: "tnum";
     min-height: 0;
     min-width: 0;
     border: none;
@@ -51,7 +49,11 @@ WAYBAR_OPAQUE_SWITCH_END */
 }
 
 window#waybar {
-    background: @glass_bar; 
+    background: @glass_bar;
+    background-image: linear-gradient(to bottom,
+        mix(@glass_bar, @primary, 0.035),
+        @glass_bar,
+        mix(@glass_bar, @tertiary, 0.035));
     color: @on_surface;
     border: none;
 }
@@ -85,24 +87,50 @@ tooltip label {
     margin: 4px 0px;
 }
 
-/* --- Group Pill Backgrounds (Fixed Visibility) --- */
-box#group-media, box#group-hardware, box#group-updates-drawer, box#group-utils, box#group-connections, box#group-bottom {
-    background-color: @glass_group;
-    border-radius: 12px;
+/* Groups provide spacing; only the clock has a pill background. */
+box#media, box#hardware, box#updates-drawer, box#utils, box#bottom {
+    background-color: transparent;
+    border-radius: 0;
     padding: 6px 0px;
     margin: 4px 0px;
 }
 
 /* --- Internal Module Spacing --- */
-#battery, #cpu, #memory, #temperature,
-#pulseaudio, #backlight, #network, #bluetooth, #tray,
+#battery, #cpu, #memory, #custom-temperature,
+#pulseaudio, #backlight, #network, #tray,
 #custom-theme, #custom-power, #custom-notification, #custom-inhibit-suspend,
-#custom-app-tray, #custom-network, #custom-audiorouter, #custom-cava, 
+#custom-app-tray, #custom-network, #custom-audiorouter, #custom-cava,
 #custom-updates, #custom-updates-trigger {
     padding: 0px;
-    margin: 3px 0px; 
+    margin: 3px 0px;
     background-color: transparent;
     transition: all 0.2s ease-in-out;
+}
+
+/* Keep group boundaries compact and leave 8px between top modules. */
+.modules-left > widget > *,
+box#media,
+box#hardware,
+box#updates-drawer {
+    padding: 0;
+    margin: 0;
+}
+
+#battery,
+#pulseaudio,
+#backlight,
+#cpu,
+#memory,
+#custom-temperature {
+    padding: 0;
+    margin: 4px 0;
+}
+
+/* Waybar v0.16.0 moves .module onto the label inside the anonymous horizontal box.
+ * Force all custom module labels to span the full 23px rail width so xalign/justify centers them. */
+widget > box > label.module,
+box.module > label {
+    min-width: 23px;
 }
 
 /* ===================================================================
@@ -121,13 +149,13 @@ box#group-media, box#group-hardware, box#group-updates-drawer, box#group-utils, 
     margin: 2px 2px;
     min-width: 14px;
     border-radius: 6px;
-    color: @on_surface_variant;
+    color: @secondary;
     background-color: transparent;
     transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-#workspaces button.empty {
-    color: alpha(@on_surface, 0.3); 
+#workspaces button.empty:not(.active):not(.urgent) {
+    color: alpha(@on_surface, 0.4);
     background-color: transparent;
     box-shadow: none;
 }
@@ -148,63 +176,69 @@ box#group-media, box#group-hardware, box#group-updates-drawer, box#group-utils, 
 /* --- Clock and Bottom Gap Control --- */
 #clock {
     font-weight: 900;
-    background-color: @glass_module; 
+    background-color: @glass_module;
+    background-image: linear-gradient(to bottom,
+        mix(@glass_module, @primary_container, 0.45), @glass_module);
     border-radius: 6px;
     color: @primary;
     padding: 4px 0px;
-    margin-top: 3px;
-    margin-bottom: 0px; 
+    margin-top: 4px;
+    margin-bottom: 0px;
     margin-left: 2px;
     margin-right: 2px;
 }
 
-box#group-bottom {
-    margin-top: 2px; 
+box#bottom {
+    margin-top: 2px;
 }
 
-/* --- Hardware Group (Tertiary Color Map) --- */
-#cpu, #memory, #temperature {
-    color: @tertiary;
+/* --- Palette Roles: Power & CPU / Audio / Light & Temperature --- */
+#battery { color: @primary; }
+#pulseaudio { color: @on_surface; }
+#backlight { color: @tertiary; }
+#cpu { color: @primary; }
+#memory { color: @secondary; }
+#custom-temperature { color: mix(@tertiary, @error, 0.28); }
+
+#cpu, #memory, #custom-temperature {
     font-weight: bold;
 }
 
-/* --- Interactive Elements (Secondary Color Map) --- */
 #pulseaudio, #backlight {
-    color: @secondary;
     font-weight: bold;
 }
 #pulseaudio.muted { color: @error; }
+#custom-temperature.critical { color: @error; }
 
 /* --- Battery --- */
 #battery {
     font-weight: 700;
-    color: @secondary;
 }
 #battery.charging, #battery.plugged { color: @primary; }
-#battery.warning { color: @error; animation: blink-critical 1s infinite alternate; }
-#battery.critical { color: @error_container; }
+#battery.warning:not(.charging):not(.plugged) { color: @error; animation: blink-critical 1s infinite alternate; }
+#battery.critical:not(.charging):not(.plugged) { color: @error; }
 
 /* --- NETWORK METER DYNAMIC CLASSES --- */
 #custom-network {
     font-size: 9px;
     transition: color 0.1s ease-in-out, text-shadow 0.1s ease-in-out;
-    padding: 2px 0px 6px 2px;
-    margin: 0px 0px 0px 0px;
+    padding: 0;
+    margin: 4px 0;
 }
 /* Subtle when idling or browsing lightly */
-#custom-network.network-kb { 
-    color: @secondary; 
+#custom-network.network-kb {
+    color: @secondary;
     font-weight: bold;
 }
 /* Glowing Alert State when pulling massive bandwidth */
-#custom-network.network-mb { 
-    color: @primary; 
+#custom-network.network-mb {
+    color: @primary;
     font-weight: 900;
     text-shadow: 0 0 5px alpha(@primary, 0.7);
 }
 /* Absolute disconnect */
-#custom-network.network-disconnected { 
-    color: @error; 
+#custom-network.network-disconnected {
+    color: @error;
 }
 
 /* --- Drawer Container & Tray Centering --- */
@@ -231,41 +265,41 @@ widget > box {
 #custom-notification,
 #custom-updates,
 #custom-updates-trigger {
-    min-width: 14px;
+    min-width: 23px;
     padding: 0px;
     margin: 3px 0px;
 }
 
-#bluetooth { color: @secondary; }
 #custom-power {
     color: @error;
     font-size: 12px;
     margin: 4px 0;
-    padding: 2px 0px 2px 7px;
+    padding: 0;
 }
 #custom-inhibit-suspend {
-    color: @on_surface_variant;
-    font-size: 10px;
-    margin: 4px 0;
-    padding: 2px 0px 2px 8px;
-}
-#custom-theme {
     color: @secondary;
+    font-size: 10px;
+    margin: 4px 0 2px;
+    padding: 0;
+}
+#custom-inhibit-suspend.disabled { color: @error; }
+#custom-theme {
+    color: @tertiary;
     font-size: 11px;
-    margin: 4px 0;
-    padding: 2px 0px 2px 7px;
+    margin: 3px 0;
+    padding: 2px 0;
 }
 #custom-notification {
-    color: @on_surface_variant;
+    color: @primary;
     font-size: 10px;
     margin: 4px 0;
-    padding: 2px 0px 2px 2px;
+    padding: 2px 0;
 }
 #custom-updates, #custom-updates-trigger { color: @tertiary; font-weight: bold; }
 
 /* --- Unified Hover States --- */
-#battery:hover, #clock:hover, #cpu:hover, #memory:hover, #temperature:hover,
-#pulseaudio:hover, #backlight:hover, #bluetooth:hover, #custom-network:hover,
+#battery:hover, #clock:hover, #cpu:hover, #memory:hover, #custom-temperature:hover,
+#pulseaudio:hover, #backlight:hover, #custom-network:hover,
 #custom-theme:hover, #custom-power:hover, #custom-notification:hover,
 #custom-audiorouter:hover, #custom-app-tray:hover,
 #custom-updates:hover, #custom-updates-trigger:hover {

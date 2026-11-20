@@ -150,6 +150,48 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_lazy_list_creation_is_retryable(self):
+        key = ("fixture", "")
+        app = DuskyTUI(engine_pool={key: Engine()}, default_engine_key=key,
+                       schema={0: [], 1: []}, tabs=["First", "Hidden"],
+                       enable_user_presets=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertFalse(app.query("#list-1"))
+            with patch.object(app, "_option_list_widgets", side_effect=RuntimeError("List fixture")):
+                with self.assertRaisesRegex(RuntimeError, "List fixture"):
+                    await app._ensure_option_list(1)
+            self.assertFalse(app._option_mount_tasks)
+            host = app.query_one("#tab-1")
+            mount = host.mount
+            async def failed_mount(*nodes, **kwargs):
+                await mount(*nodes, **kwargs)
+                raise RuntimeError("Partial mount fixture")
+            with patch.object(host, "mount", side_effect=failed_mount):
+                with self.assertRaisesRegex(RuntimeError, "Partial mount fixture"):
+                    await app._ensure_option_list(1)
+            self.assertFalse(host.children)
+            self.assertFalse(app._option_mount_tasks)
+            await asyncio.gather(app._ensure_option_list(1), app._ensure_option_list(1))
+            app.action_switch_tab(1)
+            await pilot.pause()
+            self.assertEqual(len(app.query("#list-1")), 1)
+            self.assertFalse(app._option_mount_tasks)
+
+    async def test_lazy_list_mount_keeps_notices_in_order(self):
+        key = ("fixture", "")
+        app = DuskyTUI(engine_pool={key: Engine()}, default_engine_key=key,
+                       schema={0: [], 1: []}, tabs=["First", "Hidden"],
+                       enable_user_presets=False,
+                       tab_notices={1: [{"message": "Top"}, {"message": "Bottom", "position": "bottom"}]})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            self.assertFalse(app.query("#list-wrapper-1"))
+            app.action_switch_tab(1)
+            await self.activated(app, pilot, 1)
+            self.assertEqual([child.id for child in app.query_one("#tab-1").children],
+                             ["notice-1-0", "list-wrapper-1", "notice-1-1-bot"])
+
     async def activated(self, app, pilot, tab):
         async with asyncio.timeout(15):
             while app._current_tab_index() != tab:
@@ -310,18 +352,21 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RuleSnapshotTests(unittest.TestCase):
-    def test_load_reads_rules_once_and_preserves_service_classification(self):
+    def test_load_reads_stored_rules_once_and_preserves_service_classification(self):
         engine = UfwEngine(config_path="/tmp/dusky-test-ufw-snapshot")
-        rules = [RuleRecord(number=1, to_addr="22/tcp", action="ALLOW IN", from_addr="Anywhere")]
+        commands = [["allow", "22/tcp", "comment", "dusky:service:ssh"]]
         with patch.object(engine, "_run_cmd", return_value=subprocess.CompletedProcess([], 0, "", "")), \
              patch.object(engine, "_read_domain_registry", return_value={}), \
-             patch.object(engine, "get_numbered_rules", return_value=rules) as read:
-            expected = {name: "true" if engine.is_service_allowed(name, rules=rules) else "false"
+             patch.object(engine, "get_waydroid_nat", return_value=False), \
+             patch.object(engine, "get_docker_mitigation", return_value=False), \
+             patch.object(engine, "get_icmp_ping_stealth", return_value=False), \
+             patch.object(engine, "_stored_rule_commands", return_value=commands) as read:
+            expected = {name: "true" if engine.is_service_allowed(name, commands=commands) else "false"
                         for name in COMMON_SERVICES}
             state = engine.load_state()
             read.assert_called_once_with()
             self.assertEqual({name: state[f"services/{name}"] for name in COMMON_SERVICES}, expected)
-            self.assertFalse(engine.is_service_allowed("ssh", rules=[]))
+            self.assertFalse(engine.is_service_allowed("ssh", commands=[]))
             read.assert_called_once_with()
 
     def test_banned_ip_classification_reuses_explicit_rules_even_when_empty(self):
@@ -347,6 +392,7 @@ class UfwViewTests(unittest.TestCase):
         schema = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(schema)
         engine = Mock()
+        engine.cache = {}
         engine.get_status_verbose.return_value = {}
         engine.get_numbered_rules.return_value = []
         engine.detect_wan_interface.return_value = None

@@ -1,6 +1,8 @@
 [
     {
         "position": "top",
+        "height": 32,
+        "layer": "top",
         "reload_style_on_change": true,
         "margin-top": 8,
         "modules-center": [
@@ -15,9 +17,9 @@
 
         "custom/launcher": {
             "format": "󰌽",
-            "on-click": "python3 ~/user_scripts/dusky_system/control_center/dusky_control_center.py",
-            "on-click-right": "gdbus call --session --dest org.dusky.quickpanal --object-path /org/dusky/quickpanal --method org.freedesktop.Application.Activate '{}'",
-            "tooltip-format": "Control Center"
+            "on-click": "\"$HOME/.local/bin/dusky_center\"",
+            "on-click-right": "\"$HOME/.local/bin/dusky_tray\"",
+            "tooltip-format": "LMB: Dusky Center\nRMB: Dusky Tray"
         },
 
         "custom/cava": {
@@ -28,7 +30,7 @@
 /*        "group/mpris-drawer": {
             "orientation": "inherit",
             "drawer": {
-                "transition-duration": "0.3",
+                "transition-duration": 300,
                 "children-class": "mpris-drawer",
                 "click-to-reveal": false
             },
@@ -82,13 +84,7 @@
         },
 
         "hyprland/workspaces": {
-            "format": "{icon}",
-            "format-icons": {
-                "active": "󰮯",
-                "visible": "",
-                "default": "󰊠",
-                "persistent": "󰊠"
-            },
+            "format": "{id}",
             "persistent-workspaces": {
                 "*": 4
             },
@@ -100,7 +96,7 @@
         "group/battery-drawer": {
             "orientation": "inherit",
             "drawer": {
-                "transition-duration": "0.3",
+                "transition-duration": 300,
                 "children-class": "battery-drawer",
                 "click-to-reveal": false,
                 "transition-left-to-right": false
@@ -125,8 +121,8 @@
         "backlight": {
             "format": "{icon} {percent}",
             "tooltip-format": "Brightness: {percent}%\n\n LMB  Brightness\n RMB  Night Light\n MMB  Shaders",
-            "on-click": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
-            "on-click-right": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
+            "on-click": "\"$HOME/.local/bin/dusky_tray\"",
+            "on-click-right": "\"$HOME/.local/bin/dusky_tray\"",
             "on-click-middle": "dusky-run ~/user_scripts/rofi/shader_menu.sh",
             "on-scroll-up": "brightnessctl set +5%",
             "on-scroll-down": "brightnessctl set 5%-",
@@ -184,7 +180,7 @@
         "group/hide-tray": {
             "orientation": "inherit",
             "drawer": {
-                "transition-duration": "0.5",
+                "transition-duration": 500,
                 "children-class": "hide-tray-drawer",
                 "transition-left-to-right": true,
                 "click-to-reveal": false
@@ -200,21 +196,23 @@
 
         "custom/notification": {
             "tooltip": true,
-            "tooltip-format": "Left Click: Launch Notifications\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
+            "tooltip-format": "{tooltip}\n\nLeft Click: Launch Notifications\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
             "format": "{}",
             "return-type": "json",
-            "exec-if": "which makoctl",
+            "exec-if": "command -v makoctl >/dev/null 2>&1",
             "exec": "~/user_scripts/waybar/mako.sh",
             "on-click": "~/user_scripts/rofi/rofi_mako.sh",
             "on-click-middle": "~/user_scripts/waybar/mako.sh --clear && pkill -RTMIN+8 waybar",
             "on-click-right": "makoctl mode -t do-not-disturb && pkill -RTMIN+8 waybar",
-            "escape": true
+            "escape": true,
+            "signal": 8,
+            "interval": 2
         },
 
         "group/updates-drawer": {
             "orientation": "inherit",
             "drawer": {
-                "transition-duration": "0.3",
+                "transition-duration": 300,
                 "children-class": "updates-drawer",
                 "click-to-reveal": false,
                 "transition-left-to-right": true
@@ -227,8 +225,7 @@
 
         "custom/updates-trigger": {
             "format": "",
-            "exec": "echo ''",
-            "exec-if": "grep -q '\"class\":\"pending\"' ~/.config/dusky/settings/waybar_update_counter_h 2>/dev/null",
+            "exec": "grep -qE '\"class\"[[:space:]]*:[[:space:]]*\"(pending|unknown)\"' \"$HOME/.config/dusky/settings/waybar_update_counter_h\" 2>/dev/null && printf '\\n'",
             "interval": 5,
             "tooltip": false
         },

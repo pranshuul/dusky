@@ -1,0 +1,30 @@
+pkgname=dusky_overview
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Dusky Overview workspace switcher for Hyprland'
+arch=('x86_64')
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'wayland' 'libxkbcommon' 'vulkan-icd-loader' 'mesa' 'libglvnd')
+makedepends=('cargo' 'python')
+options=('!debug')
+build() {
+  cp -aL -- "$DUSKY_PACKAGE_SOURCE" "$srcdir/project"
+  python "$DUSKY_BUILD_RUST" "$srcdir/project" "$srcdir/binary-output/dusky_overview"
+}
+
+package() {
+  install -Dm755 "$srcdir/binary-output/dusky_overview" \
+    "$pkgdir/usr/bin/dusky_overview"
+
+  install -d "$pkgdir/usr/share/dusky_overview"
+
+  python - "$srcdir/project" "$DUSKY_BUILD_RUST" > "$pkgdir/usr/share/dusky_overview/source.sha256" <<'PY'
+import sys
+from pathlib import Path
+
+project = Path(sys.argv[1])
+sys.path.insert(0, str(Path(sys.argv[2]).resolve().parent))
+from build_rust import shared
+print(shared.source_digest(project, recipe="overview-native-v2-thin-lto-tmpfs"))
+PY
+}

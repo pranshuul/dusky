@@ -4,9 +4,9 @@
     "layer": "top",
     "position": "top",
     "spacing": 0,
-    "height": 32,
-    "margin-top": 5,
-    "margin-bottom": 5,
+    "height": 0,
+    "margin-top": 2,
+    "margin-bottom": -3,
     "margin-left": 4,
     "margin-right": 4,
     "fixed-center": true,
@@ -14,19 +14,19 @@
     // ===================================================================
     // MODULE LAYOUT
     // ===================================================================
-    "modules-left": [ 
+    "modules-left": [
         "group/clock-drawer",
         "group/notif-drawer"
     ],
-    
-    "modules-center": [ 
-        "hyprland/workspaces" 
+
+    "modules-center": [
+        "hyprland/workspaces"
     ],
-    
-    "modules-right": [ 
+
+    "modules-right": [
         "group/audio-drawer",
         "group/battery-drawer",
-        "custom/power"
+        "group/power-drawer"
     ],
 
     // ===================================================================
@@ -95,7 +95,7 @@
     "hyprland/workspaces": {
         "format": "",
         "on-click": "activate",
-        "sort-by": "number",
+        "sort-by": "default",
         "persistent-workspaces": {},
         "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'",
         "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'"
@@ -128,26 +128,26 @@
 
     "custom/weather": {
         "format": "{}",
-        "exec": "python3 ~/user_scripts/waybar/weather.py",
-        "interval": 1800,
+        "exec": "python3 \"$HOME/user_scripts/waybar/weather.py\"",
+        "interval": 600,
         "return-type": "json"
     },
 
     "custom/net-speed": {
-        "exec": "$HOME/user_scripts/waybar/network/network_meter_calling.sh --horizontal",
+        "exec": "$HOME/.local/bin/dusky_network watch --horizontal",
         "return-type": "json",
         "format": "{}",
-        "interval": 1,
+        "restart-interval": 3,
         "tooltip": true
     },
 
     "custom/notification": {
         "format": "{}",
         "return-type": "json",
-        "exec-if": "which makoctl",
+        "exec-if": "command -v makoctl >/dev/null 2>&1",
         "exec": "~/user_scripts/waybar/mako.sh --horizontal",
         "interval": 2,
-        "tooltip-format": "Left Click: Launch Mako\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
+        "tooltip-format": "{tooltip}\n\nLeft Click: Launch Mako\nMiddle Click: Clear All\nRight Click: Do Not Disturb",
         "on-click": "~/user_scripts/rofi/rofi_mako.sh",
         "on-click-middle": "~/user_scripts/waybar/mako.sh --clear && pkill -RTMIN+8 waybar",
         "on-click-right": "makoctl mode -t do-not-disturb && pkill -RTMIN+8 waybar",
@@ -225,9 +225,9 @@
 
     "custom/power": {
         "format": "󰐥",
-        "tooltip-format": "Power Menu\nRight-click: Control Center",
+        "tooltip-format": "Power Menu\nLMB: Power Menu\nRMB: Dusky Center",
         "on-click": "dusky-run ~/user_scripts/wlogout/wlogout_scale.sh",
-        "on-click-right": "dusky-run python3 ~/user_scripts/dusky_system/control_center/dusky_control_center.py"
+        "on-click-right": "\"$HOME/.local/bin/dusky_center\""
     },
 
     "custom/inhibit-suspend": {

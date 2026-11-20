@@ -90,29 +90,25 @@ CORE_USER_DEFS = {
         "Battery Alerts",
         "Background daemon that monitors your battery level and sends desktop notifications using libnotify when power is running low.",
     ),
-    "network_meter.service": (
+    "dusky_network.service": (
         "Network Traffic Meter",
         "Service to track network traffic. Often used in conjunction with Waybar to display real-time upload and download speeds.",
     ),
-    "dusky.service": (
-        "Control Center Preload",
-        "Autostarts Control center to open it faster on the first invocation, second invocation is always the same",
-    ),
-    "dusky_quickpanal.service": (
-        "Dusky QuickPanal Preload",
-        "Autostarts Quick panel service to open it faster on the first Invocation, second invoke is the same regardless.",
-    ),
     "update_checker.timer": (
         "Automatic Update Checker",
-        "Periodically checks your package manager for system updates and caches the result for your status bar.",
+        "Checks local main against origin/main, then refreshes cached Pacman, AUR, and Dusky commit counts for the panels and status bar. Runs 10 minutes after the user manager starts, then every 6 hours after completion, with up to 10 minutes of jitter. Toggle this timer; its static companion service is started by the timer.",
     ),
     "hypridle.service": (
         "Hyprland Idle Daemon",
         "Hyprland's idle management daemon. Handles screen dimming, locking, and DPMS sleep states when you are away from the computer.",
     ),
+    "dusky_proximity.service": (
+        "Dusky Proximity Service",
+        "Ultra-efficient zero-fork Bluetooth proximity presence and automation daemon. Monitors RSSI of configured Bluetooth devices (smartband, watch, phone) to run custom actions on approach (wake displays, zero-fork hyprlock unlock) and departure (lock screen, pause media).",
+    ),
     "osd_lock.service": (
         "Lock Key OSD",
-        "On-Screen Display service for hardware lock keys. Shows a visual pop-up when Caps Lock, Num Lock, or Scroll Lock is toggled.",
+        "Shows Caps Lock and Num Lock pop-ups and firmware-controlled keyboard-backlight changes. Volume and brightness keybinds work independently of this service.",
     ),
     "dusky_polkit.service": (
         "Dusky Polkit",
@@ -121,6 +117,10 @@ CORE_USER_DEFS = {
     "dusky_clipboard.service": (
         "Dusky Clipboard Manager",
         "Unified Wayland clipboard history and persistence daemon (cliphist + wl-clip-persist). Seamlessly records copied text and images to SQLite history, preserves clipboard selections even after source apps close, and supports live RAM/disk persistence switching without reboot.",
+    ),
+    "dusky_phone_sync.service": (
+        "Phone Clipboard Sync",
+        "Optional two-way text clipboard sharing with Duskie on iPhone over SSH. Shares only new text copies and works independently of clipboard history.",
     ),
     "dusky_vdagent.service": (
         "VM Clipboard Sharing",
@@ -141,7 +141,7 @@ CORE_USER_DEFS = {
 
     "dusky_notif_time.service": (
         "Notification Timestamps",
-        "Background daemon that tracks exact arrival timestamps for Mako desktop notifications and caches them for QuickPanel and Rofi displays.",
+        "Background daemon that records first-observed timestamps for Mako desktop notifications and caches them for Dusky Tray and Rofi displays.",
     ),
     "modprobed-db.service": (
         "Hardware Profiler",
@@ -155,9 +155,9 @@ CORE_USER_DEFS = {
         "LLM Service (dusky_llm)",
         "Local LLM inference daemon (Ollama / llama.cpp wrapper). Handles prompt completion and embeddings for Dusky AI features.",
     ),
-    "dusky_stt.service": (
-        "STT (Parakeet GPU)",
-        "Speech-to-text daemon (NVIDIA Parakeet 0.6B, on-demand CUDA worker). ON = warm-resident: model preloaded, instant dictation, VRAM held (plugged-in mode). OFF = on-demand: hotkey still works, VRAM held only mid-job, then worker exits and the service stops itself so the dGPU can sleep (battery mode).",
+    "localai_bridge.service": (
+        "Local AI Web Bridge",
+        "WebSocket bridge daemon that connects the browser extension to the local AI backend (bridge.py --daemon). Enables the web_ai_bridge Firefox extension to send and receive messages from the local Python bridge over a local WebSocket.",
     ),
     "dusky_firefox_cache.service": (
         "Firefox Profile RAM Sync",
@@ -175,13 +175,41 @@ CORE_USER_DEFS = {
         "WirePlumber Audio Session",
         "Session and policy manager for PipeWire. Handles audio streams, hardware device switching, Bluetooth audio endpoints, and volume persistence.",
     ),
+    "pipewire.service": (
+        "PipeWire Core Audio",
+        "Low-level multimedia processing graph and audio routing engine for Wayland and Linux. Toggling or restarting resets the multimedia server.",
+    ),
+    "pipewire-pulse.service": (
+        "PipeWire PulseAudio Server",
+        "PulseAudio compatibility daemon for PipeWire. Emulates the PulseAudio socket server for legacy applications, games, and browser audio.",
+    ),
     "gamemoded.service": (
         "GameMode Optimizer",
         "Feral Interactive GameMode daemon. Temporarily prioritizes CPU frequency governors, I/O scheduling, and GPU performance while gaming.",
     ),
+    "dusky-band.service": (
+        "Dusky Band Companion",
+        "Xiaomi Mi Smart Band 5 Bluetooth LE companion daemon (dusky-band daemon). Manages continuous BLE telemetry, health metric synchronization, and desktop notification forwarding to your smart band.",
+    ),
+    "dusky_phone_sync_usb.service": (
+        "Phone Sync USB Tunnel",
+        "Spawns a local USB SSH tunnel (/usr/bin/iproxy -s 127.0.0.1 2222:22) for wired Duskie iPhone clipboard synchronization and file transfer over Lightning/Type-C.",
+    ),
+    "slsteam-desktop-guardian.timer": (
+        "Steam Desktop Guardian",
+        "Periodically reconciles Steam desktop launch shortcuts and coverage. Runs 30 seconds after login, then every 5 minutes.",
+    ),
 }
 
 CORE_SYSTEM_DEFS = {
+    "docker.service": (
+        "Docker Engine",
+        "Runs and manages Docker containers. The switch controls daemon startup enablement and starts or stops the service.",
+    ),
+    "waydroid-container.service": (
+        "Waydroid Container",
+        "Android LXC container manager for Waydroid. Starts the container manager, mounts /dev/binderfs, and manages virtual networking. Enable to run at boot, or keep disabled to start on-demand when launching Android apps.",
+    ),
     "vsftpd.service": (
         "FTP Server (vsftpd)",
         "Very Secure FTP Daemon. Manages the FTP server for file transfers. Only enable this if you actively need to host an FTP server.",
@@ -315,6 +343,14 @@ CORE_SYSTEM_DEFS = {
         "SuperGFX dGPU Switcher",
         "Dedicated GPU switching daemon for ASUS and hybrid laptops. Allows switching between Integrated, Hybrid, and Dedicated GPU graphics modes.",
     ),
+    "nvidia-powerd.service": (
+        "NVIDIA Dynamic Boost",
+        "NVIDIA Dynamic Boost daemon (/usr/bin/nvidia-powerd). Dynamically balances real-time power budget between the CPU and mobile NVIDIA RTX GPU based on current workloads.",
+    ),
+    "libvirt-guests.service": (
+        "Libvirt Guest Lifecycle",
+        "Automates clean suspension and resumption of running KVM virtual machines during host shutdown and boot.",
+    ),
 }
 
 import concurrent.futures
@@ -344,22 +380,26 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _fast_exec:
 # systemd engine, and their children keep their real unit keys and scopes.
 CORE_USER_SECTIONS = (
     ("Desktop & Session", (
-        "hyprsunset.service", "hypridle.service", "osd_lock.service",
-        "dusky_polkit.service", "dusky_clipboard.service", "dusky_vdagent.service",
-        "dusky_oom_shield.service",
-        "wireplumber.service",
+        "hyprsunset.service", "hypridle.service", "dusky_proximity.service",
+        "osd_lock.service", "dusky_polkit.service", "dusky_clipboard.service",
+        "dusky_phone_sync.service", "dusky_phone_sync_usb.service",
+        "dusky_vdagent.service", "dusky_oom_shield.service",
     )),
     ("Remote Displays & Streaming", (
         "dusky_vnc_desktop.service", "dusky_vnc_display.service",
         "dusky_moonlight_display.service", "app-dev.lizardbyte.app.Sunshine.service",
     )),
     ("Panels & Integration", (
-        "dusky.service", "dusky_quickpanal.service", "network_meter.service",
+        "dusky_network.service",
         "dusky_notif_time.service", "dusky_visualizer.service", "dusky_screentime.service",
-        "gamemoded.service",
+        "dusky-band.service",
+    )),
+    ("Gaming", (
+        "gamemoded.service", "slsteam-desktop-guardian.timer",
     )),
     ("Media & AI", (
-        "dusky_llm.service", "dusky_stt.service",
+        "pipewire.service", "pipewire-pulse.service", "wireplumber.service",
+        "dusky_llm.service", "localai_bridge.service",
     )),
     ("Power & Monitoring", (
         "dusky_battery.service", "dusky_ram_monitor.service",
@@ -374,13 +414,19 @@ CORE_USER_SECTIONS = (
 )
 
 CORE_SYSTEM_SECTIONS = (
+    ("Containers", (
+        "docker.service", "waydroid-container.service",
+    )),
+    ("Virtualization & VMs", (
+        "libvirt-guests.service",
+    )),
     ("Power & Hardware", (
         "tlp.service", "battery-charge-limit.service", "dusky_cpu.service",
         "dusky_kbd_backlight.service", "ghelper-gpu-boot.service",
         "glance_cpu_pkg_watt.service", "thermald.service", "acpid.service",
-        "asusd.service", "supergfxd.service", "dusky_zram_recompress.timer",
-        "dusky_boot_zram_flush.timer", "dusky_pro_active_zram_swap.timer",
-        "dusky_powertop_autotune.timer",
+        "asusd.service", "supergfxd.service", "nvidia-powerd.service",
+        "dusky_zram_recompress.timer", "dusky_boot_zram_flush.timer",
+        "dusky_pro_active_zram_swap.timer", "dusky_powertop_autotune.timer",
     )),
     ("Input & Session", (
         "numlock_disable.service", "dusky_keylogger.service",

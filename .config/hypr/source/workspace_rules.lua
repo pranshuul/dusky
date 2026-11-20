@@ -37,17 +37,17 @@
 -- the UI without needing any complex Lua loops or Bash arrays!
 --
 -- Full list of supported keys (all optional except `workspace`):
+-- nil inherits; gaps accept an integer or {top=4, left=8, right=8, bottom=4}.
 --   workspace       (string)  -- REQUIRED. Identifier or selector (see above).
 --   monitor         (string)  -- Bind to monitor by name ("DP-1") or desc.
 --   default         (bool)    -- Make this the default workspace on its monitor.
 --   persistent      (bool)    -- Keep workspace alive even when empty.
 --   default_name    (string)  -- Human-readable display name (shown in bars, etc.).
---   on_created_empty(string)  -- Shell command to run when workspace is first created.
 --   layout          (string)  -- Override layout: "dwindle" | "master" | "scrolling" | "monocle"
 --   layout_opts     (table)   -- Layout-specific options (see §8 for details).
---   gaps_in         (number)  -- Inner gap override (px).
---   gaps_out        (number)  -- Outer gap override (px).
---   float_gaps      (number)  -- Gaps for floating windows (px).
+--   gaps_in         (number/table)  -- Inner gap override (px).
+--   gaps_out        (number/table)  -- Outer gap override (px).
+--   float_gaps      (number/table)  -- Gaps for floating windows (px).
 --   no_border       (bool)    -- Disable all window borders on this workspace.
 --   border_size     (number)  -- Override border thickness (px).
 --   no_rounding     (bool)    -- Disable corner rounding on this workspace.
@@ -55,16 +55,56 @@
 --   no_shadow       (bool)    -- Disable window shadows on this workspace.
 --   animation       (string)  -- Override workspace switch animation style.
 -- ==============================================================================
-hl.workspace_rule({ workspace = "1", layout = nil, persistent = false })
-hl.workspace_rule({ workspace = "2", layout = nil, persistent = false })
-hl.workspace_rule({ workspace = "3", layout = nil, persistent = false })
-hl.workspace_rule({ workspace = "4", layout = nil, persistent = false })
-hl.workspace_rule({ workspace = "5", layout = nil, persistent = false })
-hl.workspace_rule({ workspace = "6", layout = nil, persistent = false })
-hl.workspace_rule({ workspace = "7", layout = nil, persistent = false })
-hl.workspace_rule({ workspace = "8", layout = nil, persistent = false })
-hl.workspace_rule({ workspace = "9", layout = nil, persistent = false })
-hl.workspace_rule({ workspace = "10", layout = nil, persistent = false })
+hl.workspace_rule({ workspace = "1", layout = nil, persistent = false, monitor = "", default = false, default_name = "",
+    border_size = nil, gaps_in = nil, gaps_out = nil, float_gaps = nil,
+    no_border = nil, no_rounding = nil, no_shadow = nil, decorate = nil, animation = nil,
+    layout_opts = { orientation = nil, direction = nil },
+})
+hl.workspace_rule({ workspace = "2", layout = nil, persistent = false, monitor = "", default = false, default_name = "",
+    border_size = nil, gaps_in = nil, gaps_out = nil, float_gaps = nil,
+    no_border = nil, no_rounding = nil, no_shadow = nil, decorate = nil, animation = nil,
+    layout_opts = { orientation = nil, direction = nil },
+})
+hl.workspace_rule({ workspace = "3", layout = nil, persistent = false, monitor = "", default = false, default_name = "",
+    border_size = nil, gaps_in = nil, gaps_out = nil, float_gaps = nil,
+    no_border = nil, no_rounding = nil, no_shadow = nil, decorate = nil, animation = nil,
+    layout_opts = { orientation = nil, direction = nil },
+})
+hl.workspace_rule({ workspace = "4", layout = nil, persistent = false, monitor = "", default = false, default_name = "",
+    border_size = nil, gaps_in = nil, gaps_out = nil, float_gaps = nil,
+    no_border = nil, no_rounding = nil, no_shadow = nil, decorate = nil, animation = nil,
+    layout_opts = { orientation = nil, direction = nil },
+})
+hl.workspace_rule({ workspace = "5", layout = nil, persistent = false, monitor = "", default = false, default_name = "",
+    border_size = nil, gaps_in = nil, gaps_out = nil, float_gaps = nil,
+    no_border = nil, no_rounding = nil, no_shadow = nil, decorate = nil, animation = nil,
+    layout_opts = { orientation = nil, direction = nil },
+})
+hl.workspace_rule({ workspace = "6", layout = nil, persistent = false, monitor = "", default = false, default_name = "",
+    border_size = nil, gaps_in = nil, gaps_out = nil, float_gaps = nil,
+    no_border = nil, no_rounding = nil, no_shadow = nil, decorate = nil, animation = nil,
+    layout_opts = { orientation = nil, direction = nil },
+})
+hl.workspace_rule({ workspace = "7", layout = nil, persistent = false, monitor = "", default = false, default_name = "",
+    border_size = nil, gaps_in = nil, gaps_out = nil, float_gaps = nil,
+    no_border = nil, no_rounding = nil, no_shadow = nil, decorate = nil, animation = nil,
+    layout_opts = { orientation = nil, direction = nil },
+})
+hl.workspace_rule({ workspace = "8", layout = nil, persistent = false, monitor = "", default = false, default_name = "",
+    border_size = nil, gaps_in = nil, gaps_out = nil, float_gaps = nil,
+    no_border = nil, no_rounding = nil, no_shadow = nil, decorate = nil, animation = nil,
+    layout_opts = { orientation = nil, direction = nil },
+})
+hl.workspace_rule({ workspace = "9", layout = nil, persistent = false, monitor = "", default = false, default_name = "",
+    border_size = nil, gaps_in = nil, gaps_out = nil, float_gaps = nil,
+    no_border = nil, no_rounding = nil, no_shadow = nil, decorate = nil, animation = nil,
+    layout_opts = { orientation = nil, direction = nil },
+})
+hl.workspace_rule({ workspace = "10", layout = nil, persistent = false, monitor = "", default = false, default_name = "",
+    border_size = nil, gaps_in = nil, gaps_out = nil, float_gaps = nil,
+    no_border = nil, no_rounding = nil, no_shadow = nil, decorate = nil, animation = nil,
+    layout_opts = { orientation = nil, direction = nil },
+})
 
 
 -- ==============================================================================
@@ -73,7 +113,7 @@ hl.workspace_rule({ workspace = "10", layout = nil, persistent = false })
 -- or when a window is in fullscreen/maximized state.
 --
 -- NOTE: The "Smart Gaps" feature has been moved to appearance.lua.
--- The Python TUI automatically reroutes the toggle there using `target_file_override`.
+-- Use the Appearance TUI → Smart tab to manage it.
 -- ==============================================================================
 
 
@@ -81,24 +121,39 @@ hl.workspace_rule({ workspace = "10", layout = nil, persistent = false })
 -- §4  SPECIAL WORKSPACES / SCRATCHPADS
 -- Special workspaces float over any monitor and can be toggled on/off.
 -- They are identified by the "special:" prefix.
--- Toggle them with: hl.dsp.workspace.toggle_special({ name = "scratchpad" })
+-- Toggle them with: hl.dispatch(hl.dsp.workspace.toggle_special("scratchpad"))
 --
 -- Notes:
---   • Each monitor gets its own independent instance of a special workspace.
+--   • Only one special workspace can be visible on a monitor at a time.
 --   • `misc.close_special_on_empty` (§10e) controls auto-close behaviour.
---   • `on_created_empty` launches an app the first time the workspace is shown.
+--   • Use the workspace.created event below to launch apps on empty creation.
+--   • Use gaps_out in hl.workspace_rule() for scratchpad margins.
+--     The magic scratchpad geometry is managed in appearance.lua (Appearance TUI → Special).
 -- ==============================================================================
 local special_workspaces = {
-    -- { name = "scratchpad", on_created_empty = "kitty" },
-    -- { name = "browser",    on_created_empty = "firefox",   layout = "scrolling" },
-    -- { name = "music",      on_created_empty = "spotify" },
-    -- { name = "notes",      on_created_empty = "obsidian" },
+    -- { name = "scratchpad", startup_command = "kitty" },
+    -- { name = "browser",    startup_command = "firefox",   layout = "scrolling" },
+    -- { name = "music",      startup_command = "spotify" },
+    -- { name = "notes",      startup_command = "obsidian" },
 }
 
+-- Optional startup commands run only when a new workspace is created empty.
+-- Reloading the config does not launch apps on existing workspaces.
+local startup_commands = {
+    -- ["2"] = "kitty", -- Numbered workspace example.
+}
+
+hl.on("workspace.created", function(ws)
+    local command = startup_commands[ws.addressable_name]
+    if ws.is_empty and command and command ~= "" then
+        hl.exec_cmd(command, { workspace = ws.addressable_name .. " silent" })
+    end
+end)
+
 for _, ws in ipairs(special_workspaces) do
+    startup_commands["special:" .. ws.name] = ws.startup_command
     hl.workspace_rule({
         workspace        = "special:" .. ws.name,
-        on_created_empty = ws.on_created_empty,
         layout           = ws.layout,  -- nil is safe; Hyprland ignores nil fields
     })
 end
@@ -108,26 +163,30 @@ end
 -- §5  NAMED / PROJECT WORKSPACES
 -- Use "name:foo" identifiers for semantic, project-specific workspaces.
 -- These can coexist alongside numbered workspaces.
--- You can navigate to them with: hl.dsp.workspace.name("coding")
+-- Navigate with: hl.dispatch(hl.dsp.focus({ workspace = "name:coding" }))
 -- ==============================================================================
 local named_workspaces = {
-    -- { name = "coding",  monitor = "DP-1",  on_created_empty = "kitty",
+    -- { name = "coding",  monitor = "DP-1",  startup_command = "kitty",
     --   gaps_in = 0, gaps_out = 0, no_border = true, no_rounding = true, decorate = false },
-    -- { name = "browser", monitor = "DP-2",  on_created_empty = "firefox" },
+    -- { name = "browser", monitor = "DP-2",  startup_command = "firefox" },
     -- { name = "gaming",  monitor = "desc:Chimei Innolux Corporation 0x150C",
     --   no_border = true, no_rounding = true, decorate = false,
     --   layout = "scrolling" },
 }
 
 for _, ws in ipairs(named_workspaces) do
+    startup_commands["name:" .. ws.name] = ws.startup_command
     hl.workspace_rule({
         workspace        = "name:" .. ws.name,
         monitor          = ws.monitor,
-        on_created_empty = ws.on_created_empty,
         layout           = ws.layout,
         layout_opts      = ws.layout_opts,
         gaps_in          = ws.gaps_in,
         gaps_out         = ws.gaps_out,
+        float_gaps       = ws.float_gaps,
+        no_shadow        = ws.no_shadow,
+        persistent       = ws.persistent,
+        default          = ws.default,
         no_border        = ws.no_border,
         border_size      = ws.border_size,
         no_rounding      = ws.no_rounding,
@@ -228,11 +287,11 @@ hl.config({
 
     -- §10b Dwindle layout
     dwindle = {
-        -- 0 = last window direction, 1 = always right/down, 2 = always left/up
+        -- 0 = follows mouse, 1 = always left/up, 2 = always right/down
         force_split                  = 0,
         -- keep the split direction when toggling — KEEP THIS TRUE for togglesplit
         preserve_split               = true,
-        -- split based on window dimensions instead of count
+        -- choose split direction using cursor-position triangles
         smart_split                  = false,
         -- resize the smaller side on manual resize
         smart_resizing               = true,
@@ -274,9 +333,9 @@ hl.config({
         -- single-column workspace fills screen
         fullscreen_on_one_column = true,
         column_width             = 0.9,
-        -- 0 = center (previews adjacent windows on both left & right) | 1 = fit (preview right only)
+        -- 0 = center (previews adjacent windows on both left & right) | 1 = fit with minimal scrolling
         focus_fit_method         = 0,
-        follow_focus             = true,
+        follow_focus             = 1, -- 0=off, 1=follow with click scrolling, 2=follow without forced click scrolling
         -- Require 40% window visibility before mouse hover auto-scrolls; prevents runaway scrolling on edge previews
         follow_min_visible       = 0.4,
         explicit_column_widths   = "0.333, 0.5, 0.667, 1.0",
@@ -290,7 +349,7 @@ hl.config({
         close_special_on_empty    = true,
         -- steal focus on activation
         focus_on_activate         = true,
-        -- 0 = stay behind | 1 = take over | 2 = swap fs
+        -- 0 = keep fullscreen focus | 1 = take over | 2 = unfullscreen/unmaximize
         on_focus_under_fullscreen = 2,
     },
 
@@ -299,10 +358,10 @@ hl.config({
         -- allow pinned windows to go fullscreen
         allow_pin_fullscreen              = true,
         -- toggle back on re-dispatch
-        workspace_back_and_forth          = false,
+        workspace_back_and_forth          = 0,
         -- wrap around at ends
         allow_workspace_cycles            = false,
-        -- 0 = cursor stays in place, 1 = move to window, 2 = move to monitor
+        -- 0 = center on workspace, 1 = center on last active window
         workspace_center_on               = 0,
         -- keep scratchpad visible on switch
         hide_special_on_workspace_change  = false,
@@ -312,3 +371,53 @@ hl.config({
         window_direction_monitor_fallback = true,
     },
 })
+
+-- Additional TUI controls; existing configuration layers keep their load order.
+hl.config({
+    layers = {
+        layers_hog_keyboard_focus = true,
+    },
+    misc = {
+        initial_workspace_tracking = 1,
+        initial_workspace_token_timeout = 10,
+        exit_window_retains_fullscreen = 0,
+        float_force_onscreen = 0,
+        new_float_force_onscreen = 2,
+        size_limits_tiled = false,
+        mouse_move_focuses_monitor = true,
+        always_follow_on_dnd = true,
+        enable_swallow = false,
+        swallow_regex = "",
+        swallow_exception_regex = "",
+    },
+    binds = {
+        focus_preferred_method = 0,
+        movefocus_cycles_groupfirst = false,
+        ignore_group_lock = false,
+        pass_mouse_when_bound = false,
+        scroll_event_delay = 300,
+        disable_keybind_grabbing = false,
+        drag_threshold = 0,
+        drag_center_window = true,
+    },
+    general = {
+        modal_parent_blocking = true,
+        no_focus_fallback = false,
+    },
+    layout = {
+        single_window_aspect_ratio_tolerance = 0.1,
+    },
+    group = {
+        auto_group = true,
+        drag_into_group = 1,
+        group_on_movetoworkspace = false,
+        insert_after_current = true,
+        focus_removed_window = true,
+        merge_groups_on_drag = true,
+        merge_groups_on_groupbar = true,
+        merge_floated_into_tiled_on_groupbar = false,
+    },
+})
+
+-- Zero disables the optional aspect-ratio padding for a single window.
+hl.config({ layout = { single_window_aspect_ratio = {0, 0} } })

@@ -12,7 +12,7 @@ local function is_target_app_active()
     local w = hl.get_active_window()
     if not w then return false end
     local class = w.class or ""
-    return class == "dusky_tui" or class == "wallpaper_selector.py" or class == "dusky-papers" or class == "factorio" or class == "terminal_clipboard.sh" or class == "dusky_snapshot_manager.py"
+    return class == "dusky_tui" or class == "wallpaper_selector.py" or class == "dusky_papers" or class == "factorio" or class == "terminal_clipboard.sh" or class == "dusky_snapshot_manager.py"
 end
 
 local function cond_bind(key, default_dsp, flags)
@@ -113,8 +113,8 @@ hl.bind(
 
 hl.bind(
     "SUPER + SPACE",
-    hl.dsp.exec_cmd([[gdbus call --session --dest com.github.dusky.controlcenter --object-path /com/github/dusky/controlcenter --method org.freedesktop.Application.Activate "{}"]]),
-    { description = "System Menu" }
+    hl.dsp.exec_cmd([[dusky-run dusky_center]]),
+    { description = "Dusky Center" }
 )
 
 hl.bind(
@@ -164,7 +164,7 @@ cond_bind(
 for _, key in ipairs({ "ALT + 4", "CTRL + SPACE" }) do
     cond_bind(
         key,
-        hl.dsp.exec_cmd(HOME .. "/.local/bin/dusky-papers"),
+        hl.dsp.exec_cmd(HOME .. "/.local/bin/dusky_papers"),
         { description = "Dusky Papers" }
     )
 end
@@ -318,10 +318,11 @@ hl.bind(
     { description = "Reload Hyprland", locked = true }
 )
 
+-- Toggle: kill the open panel if it is running, otherwise launch it.
 cond_bind(
     "ALT + V",
-    hl.dsp.exec_cmd([[gdbus call --session --dest org.dusky.quickpanal --object-path /org/dusky/quickpanal --method org.freedesktop.Application.Activate "{}"]]),
-    { description = "Dusky QuickPanal" }
+    hl.dsp.exec_cmd([["$HOME/.local/bin/dusky_tray"]]),
+    { description = "Dusky Tray (Toggle)" }
 )
 
 hl.bind(
@@ -338,7 +339,7 @@ hl.bind(
 
 hl.bind(
     "SUPER + semicolon",
-    hl.dsp.exec_cmd(terminal .. " --class performance.sh -e " .. dusky_scripts .. "performance/services_and_process_terminator.sh"),
+    hl.dsp.exec_cmd(terminal .. " --class performance.sh -e python3 \"" .. dusky_scripts .. "performance/services_and_process_terminator/terminator.py\""),
     { description = "Kill Process" }
 )
 
@@ -499,13 +500,14 @@ if f_state then
 end
 
 if use_terminal_clipboard then
-    hl.bind("SUPER + V", function()
-        os.execute("pkill -15 -f '^foot.*terminal_clipboard'")
-        hl.dispatch(hl.dsp.exec_cmd(
-            "foot --app-id=terminal_clipboard.sh " ..
+    hl.bind(
+        "SUPER + V",
+        hl.dsp.exec_cmd(
+            "pkill -15 -f '^foot.*terminal_clipboard'; exec foot --app-id=terminal_clipboard.sh " ..
             "'" .. (os.getenv("HOME") .. "/user_scripts/clipboard/terminal_clipboard.sh"):gsub("'", "'\\''") .. "'"
-        ))
-    end, { description = "Clipboard History (Terminal)" })
+        ),
+        { description = "Clipboard History (Terminal)" }
+    )
 else
     hl.bind(
         "SUPER + V",
@@ -523,25 +525,25 @@ hl.bind(
 
 hl.bind(
     "SUPER + S",
-    hl.dsp.exec_cmd(dusky_scripts .. "images/dusky_screenshot.sh --region --freeze --no-notify"),
+    hl.dsp.exec_cmd("dusky_snap --region --copy"),
     { description = "Quick Screenshot" }
 )
 
 hl.bind(
     "SHIFT + Print",
-    hl.dsp.exec_cmd([[grim - | wl-copy && notify-send "Fullscreen Screenshot in Clipboard"]]),
+    hl.dsp.exec_cmd("dusky_snap --fullscreen --copy"),
     { description = "Full Screen Quick Screenshot", locked = true }
 )
 
 hl.bind(
     "SUPER + SHIFT + S",
-    hl.dsp.exec_cmd(dusky_scripts .. "images/dusky_screenshot.sh --region --freeze --annotate --no-notify --tool arrow"),
+    hl.dsp.exec_cmd("dusky_snap --region"),
     { description = "Screenshot and Annotation" }
 )
 
 hl.bind(
     "Print",
-    hl.dsp.exec_cmd("pgrep -x swappy || (grim - | satty -f -)"),
+    hl.dsp.exec_cmd("dusky_snap --fullscreen"),
     { description = "Fullscreen Screenshot and Annotation" }
 )
 
@@ -626,11 +628,11 @@ hl.bind(
     { description = "TTS VC" }
 )
 
--- NVIDIA Parakeet
+-- English dictation (Moonshine CPU)
 hl.bind(
     "SUPER + I",
     hl.dsp.exec_cmd(dusky_scripts .. "tts_stt/dusky_parakeet/dusky_trigger.py --push"),
-    { description = "STT Parakeet GPU" }
+    { description = "STT English to clipboard" }
 )
 
 -- FasterWhisper STT
@@ -924,15 +926,33 @@ hl.bind(
 -- -------------------------------------------------------------------------------------------------
 
 hl.bind(
-    "SUPER + TAB",
-    hl.dsp.focus({ workspace = "previous" }),
-    { description = "Last Workspace", repeating = true }
+    "ALT + TAB",
+    hl.dsp.exec_cmd("dusky_overview"),
+    { description = "Dusky Overview", repeating = true }
 )
 
 hl.bind(
     "ALT + SHIFT + TAB",
-    hl.dsp.focus({ workspace = "e-1" }),
-    { description = "Cycle Backward", repeating = true }
+    hl.dsp.exec_cmd("dusky_overview --reverse"),
+    { description = "Dusky Overview (Reverse)", repeating = true }
+)
+
+hl.bind(
+    "CTRL + ALT + TAB",
+    hl.dsp.exec_cmd("dusky_overview --detailed"),
+    { description = "Dusky Overview (Detailed Window Next)", repeating = true }
+)
+
+hl.bind(
+    "CTRL + ALT + SHIFT + TAB",
+    hl.dsp.exec_cmd("dusky_overview --detailed --reverse"),
+    { description = "Dusky Overview (Detailed Window Prev)", repeating = true }
+)
+
+hl.bind(
+    "SUPER + TAB",
+    hl.dsp.focus({ workspace = "previous" }),
+    { description = "Last Workspace", repeating = true }
 )
 
 hl.bind(
@@ -1286,6 +1306,12 @@ hl.bind(
     { description = "Keyboard Brightness down", locked = true, repeating = true }
 )
 
+hl.bind(
+    "XF86KbdLightOnOff",
+    hl.dsp.exec_cmd(dusky_scripts .. "mako_osd/osd_router/osd_router.sh --kbd-bright-toggle"),
+    { description = "Toggle keyboard backlight", locked = true }
+)
+
 -- Player Controls (Routed through script for OSD feedback)
 
 hl.bind(
@@ -1376,4 +1402,20 @@ hl.bind(
     "XF86Calculator",
     hl.dsp.exec_cmd("gnome-calculator"),
     { description = "Calculator" }
+)
+
+-- Unified Craft Suite Menu / Chrome Toggle (Control + \) for EffectCraft, PhotoCraft, FilmCraft
+hl.bind(
+    "CTRL + backslash",
+    function()
+        local w = hl.get_active_window()
+        local class = (w and (w.class or w.initialClass)) or ""
+        local c = class:lower()
+        if string.find(c, "effectcraft") or string.find(c, "photocraft") or string.find(c, "filmcraft") then
+            hl.dispatch(hl.dsp.exec_cmd("craft-menu-toggle"))
+        else
+            hl.dispatch(hl.dsp.pass({ window = "activewindow" }))
+        end
+    end,
+    { description = "Toggle Craft Suite Menu / Chrome" }
 )

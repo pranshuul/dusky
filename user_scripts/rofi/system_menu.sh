@@ -23,8 +23,8 @@
 set -uo pipefail
 
 declare -gr SCRIPTS_DIR="${HOME}/user_scripts"
-declare -gr CC_DIR="${SCRIPTS_DIR}/dusky_system/control_center"
-declare -gr TEXT_EDITOR_BIN="${CC_DIR}/dusky_text_editor.py"
+declare -gr DUSKY_CENTER_DIR="${SCRIPTS_DIR}/dusky/dusky_center"
+declare -gr TEXT_EDITOR_BIN="${DUSKY_CENTER_DIR}/dusky_text_editor.py"
 declare -gr HYPR_EDIT_DIR="${HOME}/.config/hypr/edit_here"
 declare -gr SEARCH_DIR="${HOME}/Documents/pensive/linux"
 
@@ -156,7 +156,7 @@ declare -agr POWER_MENU=(
 )
 
 declare -agr CONFIGS_MENU=(
-    '  Control Center'
+    '  Dusky Center'
     '  Hypr Reload'
     '  Main Config'
     '  Keybinds'
@@ -401,7 +401,7 @@ show_display_menu() {
                 run_app "$SCRIPTS_DIR/theme_matugen/theme_ctl.sh" next
                 ;;
             '  Theme Presets')
-                run_term "dusky_matugen_presets.sh" "$SCRIPTS_DIR/theme_matugen/dusky_matugen_presets.sh"
+                run_term "dusky_tui" python3 "$SCRIPTS_DIR/theme_matugen/tui_color_presets.py"
                 ;;
             '  Theme Settings')
                 run_app "$SCRIPTS_DIR/rofi/rofi_theme.sh"
@@ -434,7 +434,7 @@ show_display_menu() {
                 run_app "$SCRIPTS_DIR/hypr/hypr_blur_opacity_shadow_toggle.sh"
                 ;;
             '  Night Light')
-                run_app "$SCRIPTS_DIR/dusky_system/quickpanal/dusky_quickpanal.py"
+                run_app "$HOME/.local/bin/dusky_tray"
                 ;;
             '  Waybar Select')
                 run_term "waybar_tui" python3 "$SCRIPTS_DIR/waybar/tui_waybars.py"
@@ -493,7 +493,7 @@ show_audio_menu() {
                 run_term_hold "dusky_tui" python3 "$SCRIPTS_DIR/dusky_recorder/tui_dusky_recorder.py"
                 ;;
             '  GIF Converter')
-                run_term_hold "hypergif" "$SCRIPTS_DIR/media_converter/video_to_gif_converter.sh"
+                run_term_hold "hypergif" python3 "$SCRIPTS_DIR/media_converter/dusky_converter.py" gif
                 ;;
             '  Wayclick Toggle')
                 run_app "$SCRIPTS_DIR/wayclick/dusky_wayclick.sh"
@@ -632,7 +632,7 @@ show_performance_menu() {
                 run_term_hold "sysbench_benchmark" "$SCRIPTS_DIR/performance/sysbench_benchmark.py"
                 ;;
             '  Process Terminator')
-                run_term_hold "process_terminator" "$SCRIPTS_DIR/performance/services_and_process_terminator.sh"
+                run_term_hold "process_terminator" python3 "$SCRIPTS_DIR/performance/services_and_process_terminator/terminator.py"
                 ;;
             '  Screentime Stats')
                 run_term_hold "dusky_screentime" python3 "$SCRIPTS_DIR/screentime/screentime_tui.py"
@@ -679,10 +679,10 @@ show_power_menu() {
                 run_app "$SCRIPTS_DIR/battery/tlp/tlp_mode_toggle.sh" power-saver
                 ;;
             '  Saver On')
-                run_term_hold "power_saver_on" "$SCRIPTS_DIR/battery/power_saver.sh" -e
+                run_term_hold "power_saver_on" "$SCRIPTS_DIR/battery/power_saver/power_saver.py" -e
                 ;;
             '  Saver Off')
-                run_term_hold "power_saver_off" "$SCRIPTS_DIR/battery/power_saver.sh" -d
+                run_term_hold "power_saver_off" "$SCRIPTS_DIR/battery/power_saver/power_saver.py" -d
                 ;;
             '  Power Manager')
                 run_term_hold "dusky_tui" python3 "$SCRIPTS_DIR/power/tui_power.py"
@@ -725,8 +725,8 @@ show_configs_menu() {
         choice=$(menu_select "Configs" CONFIGS_MENU "" "$SUB_HINT") || return 0
 
         case "$choice" in
-            '  Control Center')
-                run_app python3 "$CC_DIR/dusky_control_center.py"
+            '  Dusky Center')
+                run_app dusky_center
                 ;;
             '  Hypr Reload')
                 run_app hyprctl reload
@@ -870,7 +870,7 @@ show_help_menu() {
                 run_app "$SCRIPTS_DIR/hypr/input/rofi_keybinds/keybindings.sh"
                 ;;
             '  Keybind Cheatsheet')
-                run_term "DuskyKeybindsCheatsheet" python3.14 "$SCRIPTS_DIR/hypr/input/keybinds_cheatsheet.py"
+                run_term "DuskyKeybindsCheatsheet" python3 "$SCRIPTS_DIR/hypr/input/keybinds_cheatsheet.py"
                 ;;
             '  Edit Keybinds')
                 run_term_hold "dusky_keybinds" "$SCRIPTS_DIR/hypr/input/dusky_keybinds.py"

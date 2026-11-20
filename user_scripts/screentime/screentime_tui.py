@@ -4,12 +4,12 @@
 import argparse
 import json
 import os
-import select
-import shlex
-import signal
-import subprocess
+lazy import select
+lazy import shlex
+lazy import signal
+lazy import subprocess
 import sys
-import termios
+lazy import termios
 import time
 import traceback
 from datetime import datetime, timedelta
@@ -18,12 +18,12 @@ from typing import Any
 
 from screentime_common import DATA_DIR, DATA_FILE, THEME_FILE, HyprlandIPC, validate_data, valid_number
 
-from rich.console import Console
-from rich.live import Live
-from rich.markup import escape
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
+lazy from rich.console import Console
+lazy from rich.live import Live
+lazy from rich.markup import escape
+lazy from rich.panel import Panel
+lazy from rich.table import Table
+lazy from rich.text import Text
 
 LOG_FILE = DATA_DIR / "screentime_error.log"
 _IPC = HyprlandIPC(timeout=0.1)
@@ -39,13 +39,13 @@ DEFAULT_COLORS: dict[str, str] = {
     "cursor_bg": "#1c2528",
 }
 
-PERIOD_KEYS: dict[str, str] = {
+PERIOD_KEYS = frozendict({
     "period_today": "today",
     "period_yesterday": "yesterday",
     "period_week": "week",
     "period_month": "month",
     "period_all": "all",
-}
+})
 
 PERIOD_LIST: list[str] = ["today", "yesterday", "week", "month", "all"]
 
@@ -106,22 +106,28 @@ def ansi_color(hex_str: str, bold: bool = False) -> str:
     return f"{prefix}38;2;{r};{g};{b}m"
 
 
-def load_theme_colors() -> dict[str, str]:
+def _read_theme_colors() -> dict[str, str]:
+    """Read a complete theme; only a missing file selects the defaults."""
     colors = DEFAULT_COLORS.copy()
-    if THEME_FILE.exists():
-        try:
-            with open(THEME_FILE, "r", encoding="utf-8") as f:
-                user_colors = json.load(f)
-                if isinstance(user_colors, dict):
-                    for key, fallback in DEFAULT_COLORS.items():
-                        if key in user_colors:
-                            colors[key] = _safe_color(user_colors[key], fallback)
-                    for key, val in user_colors.items():
-                        if key not in colors:
-                            colors[key] = _safe_color(val, DEFAULT_COLORS["fg"])
-        except Exception as e:
-            log_error(f"load_theme_colors error: {e}")
+    try:
+        with THEME_FILE.open(encoding="utf-8") as f:
+            user_colors = json.load(f)
+    except FileNotFoundError:
+        return colors
+    if not isinstance(user_colors, dict):
+        raise ValueError("theme must be an object")
+    for key, val in user_colors.items():
+        colors[key] = _safe_color(val, DEFAULT_COLORS.get(key, DEFAULT_COLORS["fg"]))
     return colors
+
+
+def load_theme_colors() -> dict[str, str]:
+    """Standalone previews can use defaults when the theme is unreadable."""
+    try:
+        return _read_theme_colors()
+    except (OSError, ValueError) as e:
+        log_error(f"load_theme_colors error: {e}")
+        return DEFAULT_COLORS.copy()
 
 
 def load_screentime_data() -> dict[str, dict[str, Any]]:
@@ -365,7 +371,7 @@ def render_fzf_preview(app_class: str, range_key: str = "today") -> None:
     duration = info["duration"]
     share = duration / total_time * 100 if total_time else 0
     console.print(Text(single_line(info["name"]), style=f"bold {colors['accent']}", no_wrap=True, overflow="ellipsis"))
-    console.print(Text(f"{simplify_category(info['category'])} · {label}", style=colors['warning'], no_wrap=True, overflow="ellipsis"))
+    console.print(Text(f"{single_line(simplify_category(info['category']))} · {label}", style=colors['warning'], no_wrap=True, overflow="ellipsis"))
     console.print(Text(f"{format_duration(duration)} · {share:.1f}% of total · {info['sessions']} sessions", style=colors['success'], no_wrap=True, overflow="ellipsis"))
     if console.width >= 80:
         console.print(Text(f"Class: {single_line(target_class)} · Icon: {single_line(info['icon'])}", style=colors['muted'], no_wrap=True, overflow="ellipsis"))
@@ -467,7 +473,11 @@ def run_fzf_explorer(range_key: str = "today") -> bool:
 
     input_data = ("\0".join(lines) + "\0").encode("utf-8")
     try:
-        proc = subprocess.run(fzf_cmd, input=input_data, capture_output=True)
+        # This embedded UI owns its input format, bindings and terminal layout.
+        environment = os.environ.copy()
+        environment.pop("FZF_DEFAULT_OPTS", None)
+        environment.pop("FZF_DEFAULT_OPTS_FILE", None)
+        proc = subprocess.run(fzf_cmd, input=input_data, capture_output=True, env=environment)
         if proc.returncode not in (0, 1, 130):
             message = proc.stderr.decode("utf-8", errors="replace").strip()
             log_error(f"fzf exited {proc.returncode}: {message}")
@@ -722,7 +732,7 @@ def render_details_layout(
     if not target_info:
         empty_grid = Table.grid(expand=True)
         empty_grid.add_row(period_tabs)
-        empty_grid.add_row(Text(f"\n  ✖ No screentime data recorded for '{app_class_clean}' in period: {r_name}\n", style=f"bold {warning}"))
+        empty_grid.add_row(Text(f"\n  ✖ No screentime data recorded for '{single_line(app_class_clean)}' in period: {r_name}\n", style=f"bold {warning}"))
         empty_grid.add_row(Text("  [Esc/Enter/q] Back to Dashboard   [1-5] Switch Period", style=f"bold {accent}"))
         panel = Panel(
             empty_grid,
@@ -734,8 +744,8 @@ def render_details_layout(
         return panel, 0, 0, 0
 
     name = single_line(target_info.get("name", app_class_clean))
-    cat = simplify_category(target_info.get("category", "Application"))
-    icon = target_info.get("icon", "")
+    cat = single_line(simplify_category(target_info.get("category", "Application")))
+    icon = single_line(target_info.get("icon", ""))
     dur = target_info.get("duration", 0)
     sessions = target_info.get("sessions", 1)
     share = (dur / total_time * 100.0) if total_time > 0 else 0.0
@@ -747,7 +757,7 @@ def render_details_layout(
     meta_line.append(f"{name}", style=f"bold {success}" if is_active else f"bold {fg}")
     meta_line.append(f" ({cat})", style=f"dim {warning}")
     meta_line.append("   Class: ", style=f"dim {muted}")
-    meta_line.append(f"{app_class_clean}", style=f"{fg}")
+    meta_line.append(single_line(app_class_clean), style=f"{fg}")
     meta_line.append("   Icon: ", style=f"dim {muted}")
     meta_line.append(f"{icon or 'default'}", style=f"{success}")
 
@@ -914,7 +924,7 @@ def _write_tty(data: str) -> None:
         pass
 
 
-def parse_input_sequence(buf: bytes) -> tuple[str | None, int]:
+def parse_input_sequence(buf: bytes | bytearray) -> tuple[str | None, int]:
     """Parse one command from the front of *buf*."""
     if not buf:
         return None, 0
@@ -1075,6 +1085,7 @@ class _DashCache:
         self.colors = DEFAULT_COLORS.copy()
         self.raw_stamp: tuple[int, int, int] | None = None
         self.colors_stamp: tuple[int, int, int] | None = None
+        self.colors_error = ""
         self.error = ""
         self.summaries: dict[str, tuple[dict[str, dict[str, Any]], float, str]] = {}
         self.summary_date = datetime.now().date()
@@ -1096,62 +1107,67 @@ class _DashCache:
             self.summaries[range_key] = aggregate_by_range(self.raw_data, range_key)
         return self.summaries[range_key]
 
-    def reload(self, force: bool = False, now: float | None = None) -> None:
+    def reload(self, force: bool = False, now: float | None = None) -> bool:
         t = now if now is not None else time.monotonic()
+        changed = False
         if force or (t - self.raw_ts) >= 2.0:
             stamp = None
             try:
                 stamp = self._stamp(DATA_FILE)
-                if force or stamp != self.raw_stamp or (stamp is None and self.error):
-                    self.raw_stamp = stamp
+                if force or stamp != self.raw_stamp or self.error:
                     self.raw_data = load_screentime_data()
+                    self.raw_stamp = stamp
                     self.summaries.clear()
                     self.error = ""
+                    changed = True
             except (OSError, ValueError) as error:
                 if stamp is None:
                     self.raw_stamp = None
                 message = str(error)
                 if message != self.error:
                     log_error(message)
+                    changed = True
                 self.error = message
             self.raw_ts = t
         if force or (t - self.active_ts) >= 1.0:
-            self.active = get_active_hypr_window()
+            active = get_active_hypr_window()
+            changed |= active != self.active
+            self.active = active
             self.active_ts = t
         if force or (t - self.colors_ts) >= 5.0:
             try:
                 stamp = self._stamp(THEME_FILE)
-                if force or stamp != self.colors_stamp:
+                if force or stamp != self.colors_stamp or self.colors_error:
+                    colors = _read_theme_colors()
                     self.colors_stamp = stamp
-                    self.colors = load_theme_colors()
-            except OSError as error:
-                log_error(f"Cannot read theme: {error}")
+                    changed |= colors != self.colors
+                    self.colors = colors
+                    self.colors_error = ""
+            except (OSError, ValueError) as error:
+                message = str(error)
+                if message != self.colors_error:
+                    log_error(f"Cannot read theme: {message}")
+                self.colors_error = message
             self.colors_ts = t
+        today = datetime.now().date()
+        if today != self.summary_date:
+            self.summaries.clear()
+            self.summary_date = today
+            changed = True
+        return changed
 
 
 def _pause_live(live: Live, fd: int, old_settings: list[Any]) -> None:
     """Leave alt-screen + cbreak so a child process (FZF) can own the TTY."""
-    try:
-        live.stop()
-    except Exception as e:
-        log_error(f"live.stop: {e}")
+    live.stop()
     _write_tty(_MOUSE_OFF + _CURSOR_SHOW)
-    try:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-    except Exception as e:
-        log_error(f"pause termios restore: {e}")
+    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 def _resume_live(live: Live, fd: int) -> None:
-    try:
-        set_terminal_cbreak(fd)
-    except Exception as e:
-        log_error(f"resume cbreak: {e}")
+    set_terminal_cbreak(fd)
     _write_tty(_MOUSE_ON + _CURSOR_HIDE)
-    try:
-        live.start(refresh=True)
-    except Exception as e:
-        log_error(f"live.start: {e}")
+    live.start(refresh=True)
 
 
 def run_live_dashboard() -> None:
@@ -1245,6 +1261,7 @@ def run_live_dashboard() -> None:
         ) as live:
             input_buf = bytearray()
             running = True
+            previous_size = console.size
 
             while running:
                 try:
@@ -1253,6 +1270,7 @@ def run_live_dashboard() -> None:
                     ready = []
 
                 got_keys = False
+                input_pending = bool(input_buf)
                 if ready:
                     try:
                         chunk = os.read(fd, 4096)
@@ -1282,7 +1300,7 @@ def run_live_dashboard() -> None:
                     input_buf.clear()
 
                 while input_buf:
-                    cmd, consumed = parse_input_sequence(bytes(input_buf))
+                    cmd, consumed = parse_input_sequence(input_buf)
                     if consumed <= 0:
                         if input_buf[0] == 0x1B and len(input_buf) > 48:
                             del input_buf[0]
@@ -1417,9 +1435,11 @@ def run_live_dashboard() -> None:
                 if not running:
                     break
 
-                cache.reload(force=False)
-
-                push_frame(live)
+                changed = cache.reload(force=False)
+                size = console.size
+                if got_keys or input_pending or changed or size != previous_size:
+                    push_frame(live)
+                previous_size = size
 
     except KeyboardInterrupt:
         pass

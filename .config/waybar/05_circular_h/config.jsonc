@@ -43,9 +43,9 @@
     },
     "custom/arch": {
         "format": "󰌽",
-        "tooltip-format": "Control Center",
-        "on-click": "dusky-run python3 ~/user_scripts/dusky_system/control_center/dusky_control_center.py",
-        "on-click-right": "gdbus call --session --dest org.dusky.quickpanal --object-path /org/dusky/quickpanal --method org.freedesktop.Application.Activate '{}'"
+        "tooltip-format": "LMB: Dusky Center\nRMB: Dusky Tray",
+        "on-click": "\"$HOME/.local/bin/dusky_center\"",
+        "on-click-right": "\"$HOME/.local/bin/dusky_tray\""
     },
     "custom/lock": {
         "format": "󰌾",
@@ -64,7 +64,7 @@
     "custom/logout": {
         "format": "󰍃",
         "tooltip-format": "Logout",
-        "on-click": "hyprctl dispatch exit"
+        "on-click": "hyprctl dispatch 'hl.dsp.exit()'"
     },
     "custom/reboot": {
         "format": "󰜉",
@@ -92,8 +92,7 @@
     },
     "custom/updates-trigger": {
         "format": "",
-        "exec": "echo ''",
-        "exec-if": "grep -q '\"class\":\"pending\"' ~/.config/dusky/settings/waybar_update_counter_h 2>/dev/null",
+        "exec": "grep -qE '\"class\"[[:space:]]*:[[:space:]]*\"(pending|unknown)\"' \"$HOME/.config/dusky/settings/waybar_update_counter_h\" 2>/dev/null && printf '\\n'",
         "interval": 5,
         "tooltip": false
     },
@@ -107,13 +106,7 @@
 
     // === MODULES: LEFT ===
     "hyprland/workspaces": {
-        "format": "{icon}",
-        "format-icons": {
-            "active": "󰮯",
-            "visible": "",
-            "default": "•",
-            "persistent": "•"
-        },
+        "format": "{id}",
         "on-click": "activate",
         "persistent-workspaces": {
             "*": 5
@@ -127,8 +120,8 @@
         "format": "{icon} {percent}%",
         "format-icons": ["󰃞", "󰃟", "󰃠"],
         "tooltip-format": "LMB: Brightness Slider\nRMB: hyprsunset Slider\nMMB: Shaders",
-        "on-click": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
-        "on-click-right": "dusky-run ~/user_scripts/dusky_system/quickpanal/dusky_quickpanal.py",
+        "on-click": "\"$HOME/.local/bin/dusky_tray\"",
+        "on-click-right": "\"$HOME/.local/bin/dusky_tray\"",
         "on-click-middle": "dusky-run ~/user_scripts/rofi/shader_menu.sh",
         "on-scroll-up": "brightnessctl set +5%",
         "on-scroll-down": "brightnessctl set 5%-"
@@ -172,10 +165,10 @@
 
     // === MODULES: RIGHT ===
     "custom/net-speed": {
-        "exec": "$HOME/user_scripts/waybar/network/network_meter_calling.sh --horizontal",
+        "exec": "$HOME/.local/bin/dusky_network watch --horizontal",
         "return-type": "json",
         "format": "{}",
-        "interval": 1,
+        "restart-interval": 3,
         "tooltip": true
     },
     "battery": {
@@ -184,20 +177,21 @@
         "format-charging": "  +{capacity} +{power:.0f}W",
         "format-plugged": "󰚥 {capacity}%",
         "format-icons": ["󰂎", "󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"],
-        "on-click": "dusky-run kitty --class power_saver.sh --hold -e $HOME/user_scripts/battery/power_saver.sh --interactive",
+        "on-click": "dusky-run kitty --class power_saver.sh --hold -e \"$HOME/user_scripts/battery/power_saver/power_saver.py\" --interactive",
         "on-click-right": "dusky-run kitty --class dusky_tui -e python3 $HOME/user_scripts/hypridle/tui_dusky_hypridle.py",
         "tooltip-format": "{timeTo}\n\n󱟦 Health: {health}%\n󱐋 Power: {power:.2f}W"
     },
     "custom/notification": {
         "format": "{}",
         "return-type": "json",
-        "exec-if": "which makoctl",
+        "exec-if": "command -v makoctl >/dev/null 2>&1",
         "exec": "~/user_scripts/waybar/mako.sh",
         "on-click": "~/user_scripts/rofi/rofi_mako.sh",
         "on-click-middle": "~/user_scripts/waybar/mako.sh --clear && pkill -RTMIN+8 waybar",
         "on-click-right": "makoctl mode -t do-not-disturb && pkill -RTMIN+8 waybar",
         "signal": 8,
         "escape": true,
-        "tooltip-format": "Notifications\n\n LMB  Toggle Panel\n MMB  Clear All\n RMB  Do Not Disturb"
+        "tooltip-format": "{tooltip}\n\n LMB  Toggle Panel\n MMB  Clear All\n RMB  Do Not Disturb",
+        "interval": 2
     }
 }

@@ -1,3 +1,0 @@
-package = "dusky-papers"
-source = "user_scripts/images/dusky_papers"
-tools = ["cargo", "python"]

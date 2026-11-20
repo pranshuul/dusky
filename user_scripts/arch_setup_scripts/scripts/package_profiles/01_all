@@ -25,6 +25,7 @@ localsearch
 polkit
 dbus
 xdg-utils
+archlinux-xdg-menu
 socat
 inotify-tools
 libnotify
@@ -52,6 +53,7 @@ ttf-jetbrains-mono-nerd
 otf-atkinsonhyperlegiblemono-nerd
 ttf-atkinson-hyperlegible
 otf-atkinson-hyperlegible
+ttf-dejavu
 noto-fonts-emoji
 ttf-liberation
 terminus-font
@@ -84,11 +86,13 @@ libdbusmenu-glib
 brightnessctl
 hyprshutdown
 # Group 5: Audio & Bluetooth
+rtkit
 pipewire
 pipewire-alsa
 alsa-utils
 wireplumber
 pipewire-pulse
+pamixer
 playerctl
 bluez
 bluez-utils
@@ -157,7 +161,6 @@ gvfs
 gvfs-mtp
 gvfs-nfs
 gvfs-smb
-gvfs-gphoto2
 gvfs-afc
 gvfs-dnssd
 catfish
@@ -246,6 +249,7 @@ man-db
 lsof
 khal
 # Group 9: Development
+rust
 neovim
 git
 git-delta
@@ -270,6 +274,7 @@ fzf
 shfmt
 stylua
 prettier
+npm
 tree-sitter-cli
 nano
 lua51
@@ -278,7 +283,9 @@ luarocks
 ffmpeg
 mpv
 mpv-mpris
-satty
+vapoursynth
+vapoursynth-plugin-mvtools
+ncnn
 swayimg
 resvg
 imagemagick

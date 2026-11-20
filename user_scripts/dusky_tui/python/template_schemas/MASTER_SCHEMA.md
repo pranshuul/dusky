@@ -8,8 +8,10 @@ semantics, key catalog, and quirks, so you do **not** need to read the engine
 source code.
 
 - **Frontend contract:** `python/frontend/core_types.py` (ConfigItem), `python/frontend/ui.py` (rendering)
+- **Shared color handling:** `python/frontend/colors.py` (literal parsing, hue adjustment)
 - **Router:** `python/main/main.py` (loading, routing, CLI)
-- **Engine list:** see the [Engine Routing Table](#engine-routing-table) below
+- **File I/O shared by the audited engines:** `python/shared/config_io.py`
+- **Engine list:** see the [Engine Routing Table](#5-engine-routing-table) below
 
 ---
 
@@ -19,11 +21,11 @@ source code.
 
 1. Direct path (`python main.py ~/user_scripts/hypr/input/tui_input.py`)
 2. Dot-notation relative to the search paths: `~/user_scripts`, `~/.config/dusky_schema`, `~/Documents/schemas` (`main.py hypr.input.tui_input` → `~/user_scripts/hypr/input/tui_input.py`)
+3. Real schemas live in `~/user_scripts/**/tui_*.py` and are executable on their own (they re-invoke the router via a `__main__` block).
 
 > The router's own `--help` epilog still shows the stale example
 > `hypr.input_tui`, which does **not** resolve — use the direct path or
 > `hypr.input.tui_input`.
-3. Real schemas live in `~/user_scripts/**/tui_*.py` and are executable on their own (they re-invoke the router via a `__main__` block).
 
 Required module attributes (missing one → fatal error):
 
@@ -47,7 +49,7 @@ Optional module attributes:
 | `TAB_NOTICES` | `None` | `{tab_index: {"level": "info"\|"warning"\|"danger"\|"success", "message": str, "position": "top"\|"bottom" (default top)}}` or `{tab_index: [{...}, ...]}` — persistent `NoticeBox` banner(s) rendered above/below the option list for that tab. |
 | `DEFERRED_LOAD` | `None` | Callable run in a background thread after first paint and again on F5. Return the tab indices to populate; optionally return `(indices, new_items)` to replace `SCHEMA[tab]`, or `(indices, new_items, default_engine_state)` if discovery already read the default engine state. `new_items` may be `None`. The UI re-reads state if a setting changed during discovery. Used for slow/dynamic tabs (systemd services, network scans). In headless mode the router calls it for side-effects. |
 | `HIDE_MISSING_ITEMS` | `False` | Opt in to hiding items absent from their engine state and `menu` folders with no visible children. Group headings are generated from visible rows, so empty groups also disappear. The schema stays intact; tab labels remain. Use only when an absent state key means the item is unavailable, including for every routed engine in a mixed-engine schema. Hidden items are excluded from edits and resets. |
-| `REQUIRE_ROOT` | `False` | Re-executes the whole router via `sudo`/`su` with real-user `HOME`/`XDG_*` reconstruction and `XDG_CONFIG_HOME` chown fix. |
+| `REQUIRE_ROOT` | `False` | Re-executes the whole router via `sudo`/`su` with real-user `HOME`/`XDG_*` reconstruction. |
 | `CUSTOM_VIEWS` | `None` | `{tab_index_or_name: view_spec}` — replaces that tab's `ConfigOptionList` with a custom renderable. `view_spec` may be a `Widget` subclass, a `Widget` instance, a callable `(app) -> renderable`, or `{"view": <above>, "interval": float_seconds}` for auto-refresh. `CustomRichTabWidget` handles `refresh_interval` and scroll bindings. F5 reruns callable views; custom `Widget` implementations can expose a no-argument `update_content()` method to reload their data, otherwise F5 repaints them. See `tui_dusky_network.py` `render_network_dashboard_view`. |
 
 After the first tab paints, the frontend prepares other ready option lists one
@@ -75,7 +77,7 @@ Source of truth: `frontend/core_types.py`. All fields except `label`, `key`,
 | `scope` | `str` | | `"DEFAULT"` for root/global keys. Engine-specific otherwise (section name, block name, dotted path, `/`-joined path…). See per-engine docs. |
 | `options` | `list` | | `cycle`/`picker` require it. On `int`/`float`/`string`/`color` it turns the row into a hybrid dropdown. Elements may be non-strings (ints are fine). |
 | `hints` | `list[str]` | | Subtitles for `picker` modals, positionally aligned with `options` (missing entries render without a subtitle; extras are ignored). |
-| `min_val` / `max_val` / `step` | `float\|None` | | Numeric bounds / arrow-key step for `int`/`float`. |
+| `min_val` / `max_val` / `step` | `float\|None` | | Numeric bounds / arrow-key step for `int`/`float`. For `color` without options, `step` is the hue adjustment in degrees (default 15); min/max do not apply. |
 | `group` | `str\|None` | | Renders a section header (uppercased). Same-group items MUST be contiguous. **Reserved: `"User Presets"`** — do not use it in your schema. |
 | `extended_help` | `str\|None` | | Markdown shown in the `?` help panel. Include it on every item. |
 | `preset_payload` | `dict\|None` | | For `preset`. Keys are exact item UIDs (`scope.key`, dots even when scope has slashes) with **Python-native values** matching the target item's `type_` (e.g. `True` not `"true"`, `5` not `"5"`); unlisted keys are FORCED back to their `default` on apply. `{"__ALL_DEFAULTS__": True}` resets everything. |
@@ -88,6 +90,7 @@ Source of truth: `frontend/core_types.py`. All fields except `label`, `key`,
 | `target_file_override` | `str\|None` | | Routes this item to a different file (registers a second engine instance). |
 | `engine_type_override` | `str\|None` | | Routes this item to a different engine. |
 | `force_interactive` | `bool\|None` | | `action` only: `True` forces suspend-TTY execution, `False` forces async non-interactive — overrides command sniffing. |
+| `read_only` | `bool` | | Default `False`. Displays observed state but blocks edits, action activation, presets, and resets for this item. |
 
 Internal fields (do not set in a schema): `value`, `exists_in_target`,
 `initial_value`, `_initial_loaded`, `_ratio_cache`.
@@ -116,7 +119,7 @@ identifier) → prefixed `__VAR__<val>`; `None` → `"nil"`. `deserialize` strip
 | `string` | Free text input; `options` → hybrid dropdown. | `str` | options |
 | `cycle` | Left/right instant cycling through `options`. | `str` | options (required) |
 | `picker` | Fullscreen modal list over `options` with `hints` subtitles (arrow-key navigation; not searchable — that's the global Ctrl+F `SearchScreen`). | `str` | options (required), hints |
-| `color` | Hex/RGB/HSL/oklch/CSS-named/theme-variable. Theme variables serialize with `__VAR__`. | `str` | options (hybrid) |
+| `color` | Literal colors render as swatches; unresolved variables remain text and serialize with `__VAR__`. Arrows cycle `options`, or adjust hue when no options are supplied. | `str` | options (hybrid), step (hue degrees) |
 | `menu` | Pure UI folder, no backend value. | `None` | `is_parent=True` (required) |
 | `action` | Runs `default` as a shell command. Interactive commands (vim, ssh, tui…) run with TTY suspended; set `force_interactive` to override. 15s timeout for non-interactive. | shell command string | confirm_message, force_interactive, popup_message |
 | `preset` | Applies a strict state snapshot from `preset_payload`; omitted keys revert to defaults. | `None` | preset_payload, confirm_message |
@@ -135,11 +138,41 @@ or starts with `"trigger:"`/`"copy:"` (the suffix becomes the button label, e.g.
 (e.g. `network`'s `clipboard` scope) reads the row label and copies its value
 part to the clipboard — the copy itself is engine-side, not generic UI.
 
+Baked theme selections use momentary bool triggers. For the `matugen_presets` engine, use `scope="DEFAULT"`, `key="vivid_apply_<catalog_id>"`, `default=False`, and `options=["trigger:<#RRGGBB>"]`. The engine selects by catalog ID; the color suffix supplies a preview only. Keep a hex in the label when it must remain visible alongside the swatch. Do not use native `preset_payload` snapshots for pack application. False trigger writes during reset/profile loading are no-ops.
+
+### Color previews and editing
+
+The shared frontend automatically replaces recognized literal color values
+with a colored `⬤` in value rows, picker/hybrid options, and the change preview.
+Trigger/copy labels such as `options=["trigger:#FF0055"]` also get a swatch.
+Schemas do not need their own preview code. Stored values, serialization,
+picker selections, and editable input text retain the actual value.
+
+Recognized explicit formats include `#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`,
+`0xRRGGBB`, `0xAARRGGBB`, Hyprland `rgb(RRGGBB)` / `rgba(RRGGBBAA)`,
+comma-separated RGB/RGBA and HSL/HSLA (for example `rgb(255, 0, 85)` and
+`hsla(340, 100%, 50%, .5)`), and OKLCH (for example
+`oklch(60% 0.2 30deg / 50%)`). The preview shows RGB; opacity remains in the
+stored value. Unsupported or malformed values remain visible as text.
+
+Bare hex and CSS color names are recognized in `type_="color"` value rows.
+Other row types and picker/hybrid option lists require explicit color syntax,
+so ordinary strings such as `fade`, `deadbeef`, or `Red` remain text there.
+Unresolved variables such as `$primary`, `rgba($primary)`, `var(--primary)`,
+and `{{colors.primary.default.hex}}` display their original text.
+
+For `color` rows, schema `options` take precedence when using arrow keys.
+Without options, arrows rotate the current hue by `step` degrees (default 15),
+preserving opacity and the color format family. HSL/OKLCH retain their
+saturation/chroma and lightness; named colors become hex, and short hex may
+expand. Achromatic RGB/hex values and unresolved variables stay unchanged.
+Parsing is lazy and cached; plain TUIs do not load the shared color module.
+
 ### Info/label rows
 
-For read-only, engine-updated rows use `type_="action"` with `default=":"` (a
-no-op shell command) — the engine rewrites `item.label` at runtime (see the
-network engine's status/speed-test/hotspot tabs).
+For read-only, engine-updated rows use `read_only=True`, `type_="action"`, and
+`default=":"` (a no-op shell command) — the engine rewrites `item.label` at
+runtime (see the network engine's status/speed-test/hotspot tabs).
 
 > ⚠️ `default="nil"` is the **serialized form of `None`**, not a shell command.
 > If an `action` row with that default is activated, the TUI executes the
@@ -158,14 +191,22 @@ network engine's status/speed-test/hotspot tabs).
 3. **Theme file axiom** — `THEME_FILE` must stay
    `~/.config/matugen/generated/dusky_tui.json`; the TUI reads keys like
    `bg`, `fg`, `accent`, `error`, `warning`, `success`, `muted`, `info` from it
-   (with hardcoded fallbacks).
+   over a complete fallback palette derived from Textual's built-in theme.
+   No fixed hex fallback palette is maintained in the frontend. A missing or
+   unreadable generated file leaves that palette usable at startup. At startup,
+   missing keys in a partial theme retain their fallback values. Theme updates are
+   watched automatically. If the file disappears or contains malformed JSON,
+   the current palette stays active; a later valid file is loaded normally.
 4. **Contiguity** — items sharing a `group` must be adjacent; a parent and all
    its `parent_ref` children must form one unbroken block.
 5. **Hybrid folders** — `is_parent=True` works on any real type (the header
    holds a value, e.g. a master toggle). Pure `menu` folders are the
    value-less variant. **One level deep only.**
-6. **Presets are strict snapshots** — every key you don't list is reset to its
-   default on apply. List all keys you care about, or use `__ALL_DEFAULTS__`.
+6. **Presets are strict snapshots of the default engine target** — every key
+   there that you don't list is reset to its default on apply. List all keys you
+   care about, or use `__ALL_DEFAULTS__`. User-profile saves and preset application
+   exclude separately routed engine/file overrides. Headless `--default` resets
+   those targets separately as well.
 7. **Reserved names** — `group="User Presets"` is managed by the TUI itself
    (dynamic user profiles); never emit it. `key` prefixes like `action_`,
    `preset_`, `__user_preset_`, `__save_new_preset`, `__import_new_preset` are
@@ -177,22 +218,68 @@ network engine's status/speed-test/hotspot tabs).
    only genuinely unavailable items for that schema. Engines that bridge
    state (bridged_ini, cmdline, systemd_boot) or virtualize defaults
    (trackpad, monitor, autostart) have their own state-key behavior.
-9. **Root privileges** — engines touching system files either fall back to
-   `sudo -n tee` internally (returning `AUTH_REQUIRED`, which the TUI turns
-   into a password prompt) or you set `REQUIRE_ROOT = True` on the schema.
-   `REQUIRE_ROOT` re-executes with the real user's environment reconstructed.
+9. **Root privileges** — an engine can return `AUTH_REQUIRED` when a protected
+   write needs authorization; the TUI handles the existing password flow.
+   The INI engines use the sudo credential cache to run the shared atomic save
+   helper. Other engines have their own privilege handling; follow their docs
+   or set `REQUIRE_ROOT = True` to re-execute the router with the real user's
+   environment reconstructed.
+
+### File-engine reads and writes
+
+The public engine contract remains `target_path`, `load_state()`,
+`write_value(key, scope, serialized_value, item_type)`, and
+`write_batch([(key, scope, serialized_value, item_type), ...])`. Writes return
+`(success, message, debug)`. Always inspect `success`; debug output can report
+that configuration was saved but a subsequent service reload failed.
+
+INI, Bridged INI, FlatDotConfig, Matugen, and TOML use the shared
+`python/shared/config_io.py` read/commit helpers. Lua uses its snapshot helpers and
+separate staging for multiple files. Schemas do not import this helper or
+implement their own save routines; the router supplies the engine instances.
+Other engines retain their own implementations and guarantees.
+
+- The audited engines detect changes to writable targets since state was loaded
+  and refuse stale writes with a reload-required result. Refresh state before
+  retrying; F5 preserves pending UI edits.
+- File replacement is atomic per file. Shared commits preserve existing
+  ownership and mode, sync the file and directory, and clean up staged files.
+  Lua prepares all replacements before committing, but an error during the
+  replacement phase can leave some files saved; its error reports that count.
+- A schema default supplies a displayed value for an absent key; it does not
+  guarantee that the engine can create that binding. Lua requires every batch
+  target to exist at an executed, unambiguous writable call site. Repeated
+  calls and several calls to the same method on one source line can be
+  ambiguous. Missing or ambiguous targets abort the batch before replacement.
+- Matugen toggles existing template blocks. Missing or duplicate template names
+  abort the batch; the resulting active TOML is validated before saving.
+- INI and FlatDotConfig values cannot contain physical newlines or NUL.
+  FlatDotConfig's `:N` suffix selects an existing duplicate or the next
+  appendable occurrence; gaps fail before saving.
+- TOML regenerates the document and discards comments. Deleting an absent
+  nested key does not create empty tables. Slash-separated paths preserve
+  literal dots in their individual components; see the per-engine docs for
+  exact path semantics.
+
+Lua resolves local modules from the target directory first. Targets under
+`$XDG_CONFIG_HOME/hypr` (default `~/.config/hypr`) also resolve `require` modules
+from that configuration root. Only loaded `.lua` files within the target
+configuration directory are eligible for writes. See [engines/lua.md](./engines/lua.md).
 
 ---
 
 ## 5. Engine Routing Table
 
-`ENGINE_TYPE` is case-insensitive. `engines/<name>.md` is the per-engine doc.
+`ENGINE_TYPE` is case-insensitive. The Doc column links each engine's reference;
+TLP currently links its implementation because it has no separate engine doc.
 
 | ENGINE_TYPE | Doc | Class | Default target | Scope semantics (summary) |
 |---|---|---|---|---|
 | `ini` | [engines/ini.md](./engines/ini.md) | `IniConfigEngine` | `/etc/pacman.conf` | `[section]` → scope; root keys → `DEFAULT`; valueless flags |
+| `tlp` | [source](../engines/tlp.py) | `TlpConfigEngine` | `/etc/tlp.conf` | scope `DEFAULT`; explicit root `KEY=VALUE` / `KEY+=VALUE` settings; TLP 1.11+ profile keys |
 | `bridged_ini` | [engines/bridged_ini.md](./engines/bridged_ini.md) | `BridgedIniEngine` | any INI | like ini, but commented-out defaults are read too |
 | `lua` | [engines/lua.md](./engines/lua.md) | `HyprlandLuaEngine` | `~/Documents/hyprland.lua` | `hl.config` table path (`a/b`); `hl.method` → `method/<id>` |
+| `neovim` | [engines/neovim.md](./engines/neovim.md) | `NeovimEngine` | deployed `~/.config/nvim/lua/config/options.lua` | native `options`/`globals` assignments and literal plugin `opts/...` fields |
 | `autostart` | [engines/autostart.md](./engines/autostart.md) | `AutostartLuaEngine` | hyprland Lua | scope `autostart`, fixed key catalog |
 | `trackpad` | [engines/trackpad.md](./engines/trackpad.md) | `TrackpadLuaEngine` | hyprland Lua | scope `gestures`; gestures via `gesture/<f>/<dir>` |
 | `monitor` | [engines/monitor.md](./engines/monitor.md) | `MonitorLuaEngine` | `~/Documents/monitors.lua` | scope `monitor/<name>`; `workspace_rule/<1-10>`; globals `misc`/`debug`/`render` |
@@ -212,13 +299,17 @@ network engine's status/speed-test/hotspot tabs).
 | `dusky_sites` | [engines/dusky_sites.md](./engines/dusky_sites.md) | `DuskySitesEngine` | `~/.config/dusky/settings/dusky_sites/config.json` | fixed keys + `site_*`/`domain_*` |
 | `locale_gen` | [engines/locale_gen.md](./engines/locale_gen.md) | `LocaleGenEngine` | `/etc/locale.gen` | locale codes as bools + actions |
 | `matugen` / `matugen_toml` | [engines/matugen.md](./engines/matugen.md) | `MatugenEngine` | `~/.config/matugen/config.toml` | template names as bools |
+| `matugen_presets` / `matugen_color` / `color_presets` / `theme_presets` | [engines/matugen_presets.md](./engines/matugen_presets.md) | `MatugenPresetsEngine` | `~/.config/dusky/settings/dusky_theme/state.conf` | scope `DEFAULT`; theme state, color presets, favorites, and theme-controller actions |
 | `fontconfig` | [engines/fontconfig.md](./engines/fontconfig.md) | `FontconfigEngine` | `~/.config/fontconfig/conf.d/99-dusky-fonts.conf` | family aliases + render props |
 | `toml` / `toml_engine` | [engines/toml.md](./engines/toml.md) | `TomlEngine` | any TOML | dotted table path, deep nesting |
+| `bluetooth_proximity` | [engines/bluetooth_proximity.md](./engines/bluetooth_proximity.md) | `BluetoothProximityEngine` | deployed Bluetooth automation TOML | globals, indexed `devices/N`, and `controls` triggers |
+| `kokoro` / `dusky_kokoro` | [engines/kokoro.md](./engines/kokoro.md) | `KokoroEngine` | `~/.config/dusky-kokoro/config.toml` | TOML scopes plus virtual voice-blend controls and daemon telemetry; inherits `TomlEngine` |
 | `systemd_dns` | [engines/systemd_dns.md](./engines/systemd_dns.md) | `SystemdDnsEngine` | `/etc/systemd/resolved.conf.d/99-dns-tui.conf` | fixed `[Resolve]` keys |
 | `starship` | [engines/starship.md](./engines/starship.md) | `StarshipEngine` | `~/.config/starship.toml` | scope ignored; keys `active_prompt` (preset selector), `custom_prompt_name` (string), `action_save_custom` (trigger) — atomic whole-file TOML swap, hash-matched state file |
 | `hyprlock` | [engines/hyprlock.md](./engines/hyprlock.md) | `HyprlockEngine` | `~/.config/hypr/hyprlock.conf` | scope ignored; keys `hyprlock`/`active_theme_number` (int), `active_theme_folder` (str), `active_theme_name` (str), `toggle_forward`/`toggle_backward` (triggers) |
-| `systemd_power` | [engines/systemd_power.md](./engines/systemd_power.md) | `SystemdPowerEngine` | `/etc/systemd/logind.conf.d/99-power.conf` | scope `Login`; systemd-logind drop-in with base bridging, defaults virtualization, daemon reload |
+| `systemd_power` / `systemd_logind` / `power_engine` | [engines/systemd_power.md](./engines/systemd_power.md) | `SystemdPowerEngine` | `/etc/systemd/logind.conf.d/99-power.conf` | scope `Login`; systemd-logind drop-in with base bridging, defaults virtualization, daemon reload |
 | `ufw` / `ufw_firewall` | [engines/ufw.md](./engines/ufw.md) | `UfwEngine` | `/etc/default/ufw` | scopes `status`, `builder`, `domains`, `framework`, `actions`, `reports`; complete rule lifecycle, DNS domain whitelisting/lockdown, NAT, Docker mitigation |
+| `gsettings` / `dconf` | [engines/gsettings.md](./engines/gsettings.md) | `GSettingsEngine` | `~/.config/dconf/user` | GSettings schema ID → scope; schema key → `key`; PyGObject in-process Gio with CLI fallback; live Hyprland cursor sync |
 
 > `engines/rich_speedtest.py` is **not** an engine — it is a Rich-based speed
 > test UI helper invoked by the `network` engine.
@@ -232,13 +323,17 @@ python main.py hypr.input.tui_input              # launch TUI (or pass the path)
 python main.py ~/user_scripts/hypr/input/tui_input.py --set sensitivity=0.5  # headless set (scope.key)
 python main.py hypr.input.tui_input --set key=value       # unambiguous bare key ok
 python main.py hypr.input.tui_input --reset-key <key>     # reset one key to default
-python main.py hypr.input.tui_input --default             # reset everything (backs up)
+python main.py hypr.input.tui_input --backup --default    # back up, then reset writable settings
 python main.py hypr.input.tui_input --export-state        # dump engine state JSON
 python main.py hypr.input.tui_input --export-docs         # markdown docs from schema
-python main.py hypr.input.tui_input --backup / --restore  # atomic file backups
+python main.py hypr.input.tui_input --backup              # back up, then launch TUI
+python main.py hypr.input.tui_input --restore             # restore the latest backup and exit
 ```
 
 Ambiguous bare keys (same key in multiple scopes) require `scope.key`.
+`--default` alone does not create a backup; add `--backup` when one is needed.
+Different routed engines can complete independently during a reset, so check
+its exit status and output rather than assuming a transaction across targets.
 
 ---
 
@@ -254,16 +349,16 @@ ConfigItem(
     key            = "backend_key",        # unique within its scope
     scope          = "DEFAULT",            # engine-specific section/block/path or DEFAULT
     type_          = "bool",               # bool|int|float|string|cycle|picker|color|menu|action|preset
-    default        = None,                 # native Python type MUST match type_
+    default        = False,                # native Python type MUST match type_
                                            # action -> shell command string
                                            # menu / preset -> None
     options        = [],                   # required for cycle/picker; hybrid dropdown for int/float/string/color
     hints          = [],                   # picker subtitles (positionally aligned with options)
     min_val        = None,                 # int/float lower bound
     max_val        = None,                 # int/float upper bound
-    step           = None,                 # int/float arrow step
+    step           = None,                 # int/float arrow step; color hue degrees (default 15)
     group          = "OneWord",            # section header; contiguous blocks
-    extended_help  = "**Help**\\n\\nMarkdown explaining the setting.",
+    extended_help  = "**Help**\n\nMarkdown explaining the setting.",
     is_parent      = False,                # True -> expandable hybrid folder (any type)
     parent_ref     = None,                 # exact parent UID "scope.key" (or "key" if DEFAULT)
     expanded       = False,                # parent folder default state
@@ -274,6 +369,7 @@ ConfigItem(
     target_file_override = None,           # route to another file
     engine_type_override = None,           # route to another engine
     force_interactive = None,              # action only: force TTY vs async run
+    read_only      = False,                # True -> display only; block writes/actions/resets
 )
 
 # Trigger button (momentary action):
@@ -295,7 +391,7 @@ if str(_DUSKY_TUI_ROOT) not in sys.path:
 from python.frontend.core_types import ConfigItem
 
 ENGINE_TYPE = "ini"
-TARGET_FILE = "~/.config/mako/config"
+TARGET_FILE = "~/.config/dusky/settings/example/config.ini"
 APP_TITLE = "Dusky Config"
 DEFAULT_MODE = "auto"
 THEME_FILE = "~/.config/matugen/generated/dusky_tui.json"

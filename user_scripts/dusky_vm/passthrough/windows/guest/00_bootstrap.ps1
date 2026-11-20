@@ -1,0 +1,255 @@
+<#
+.SYNOPSIS
+    Configure Windows 11 guest tools and the matching Looking Glass IDD.
+.DESCRIPTION
+    Uses Python 3.15+ already installed or bundled at python\python.exe.
+    PythonIndex may reference an offline index produced by Python install manager.
+    Place looking-glass-idd-setup.exe beside this script, from the Linux client's build.
+#>
+[CmdletBinding()]
+param(
+    [string]$PythonExe,
+    [string]$PythonIndex,
+    [string]$IddInstaller,
+    [string]$IddPublisherCertificate,
+    [switch]$TrustIddPublisher,
+    [string]$VirtioIso,
+    [string]$OpenSshSource,
+    [string]$OpenSshZip,
+    [switch]$EnableRdp,
+    [switch]$SkipSsh,
+    [switch]$SkipSpice,
+    [switch]$SkipLookingGlass,
+    [switch]$Interactive
+)
+$ErrorActionPreference = 'Stop'
+$scriptDir = $PSScriptRoot
+
+function Quote-PS([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
+
+function Ask-YesNo([string]$Question, [bool]$Default) {
+    $hint = if ($Default) { '[Y/n]' } else { '[y/N]' }
+    while ($true) {
+        $answer = (Read-Host "$Question $hint").Trim().ToLowerInvariant()
+        if (-not $answer) { return $Default }
+        if ($answer -in @('y', 'yes')) { return $true }
+        if ($answer -in @('n', 'no')) { return $false }
+        Write-Host 'Enter y or n.'
+    }
+}
+
+# Resolve caller-relative media paths before crossing the UAC boundary. A bad
+# explicit path is an input error, not a reason to choose some other runtime.
+try {
+    if ($Interactive -or $PSBoundParameters.Count -eq 0) {
+        if (-not $PSBoundParameters.ContainsKey('SkipLookingGlass')) { $SkipLookingGlass = -not (Ask-YesNo 'Install Looking Glass IDD?' $true) }
+        if (-not $PSBoundParameters.ContainsKey('EnableRdp')) { $EnableRdp = Ask-YesNo 'Enable Windows Remote Desktop?' $true }
+        if (-not $PSBoundParameters.ContainsKey('SkipSsh')) { $SkipSsh = -not (Ask-YesNo 'Configure OpenSSH Server?' $false) }
+        if (-not $PSBoundParameters.ContainsKey('SkipSpice')) { $SkipSpice = -not (Ask-YesNo 'Install/verify VirtIO and SPICE guest tools?' $true) }
+        if (-not $SkipLookingGlass -and -not $TrustIddPublisher -and -not $IddPublisherCertificate -and -not $PSBoundParameters.ContainsKey('TrustIddPublisher')) {
+            $TrustIddPublisher = Ask-YesNo 'Trust the Windows-verified IDD installer publisher for silent installation?' $true
+        }
+        if (-not $SkipSsh -and -not $OpenSshSource -and -not $OpenSshZip -and -not (Get-Service sshd -ErrorAction SilentlyContinue)) {
+            $OpenSshZip = Read-Host 'Offline OpenSSH ZIP path (blank to enter a Features-on-Demand directory)'
+            if (-not $OpenSshZip) { $OpenSshSource = Read-Host 'Offline Features-on-Demand directory' }
+        }
+        foreach ($name in @('SkipLookingGlass','EnableRdp','SkipSsh','SkipSpice','TrustIddPublisher')) {
+            $PSBoundParameters[$name] = [Management.Automation.SwitchParameter](Get-Variable $name -ValueOnly)
+        }
+        $null = $PSBoundParameters.Remove('Interactive')
+    }
+    if (-not $SkipLookingGlass -and -not $IddInstaller) { $IddInstaller = Join-Path $scriptDir 'looking-glass-idd-setup.exe' }
+    if (-not $SkipLookingGlass -and -not (Test-Path -LiteralPath $IddInstaller -PathType Leaf)) {
+        throw 'Provide the matching looking-glass-idd-setup.exe beside this bootstrapper or pass -IddInstaller PATH. See README.md.'
+    }
+    foreach ($name in @('PythonExe', 'PythonIndex', 'IddInstaller', 'IddPublisherCertificate', 'VirtioIso', 'OpenSshSource', 'OpenSshZip')) {
+        $value = Get-Variable -Name $name -ValueOnly
+        if ($value) {
+            $resolved = (Resolve-Path -LiteralPath $value).ProviderPath
+            if ($name -ne 'OpenSshSource' -and -not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+                throw "-$name must name a file: $value"
+            }
+            Set-Variable -Name $name -Value $resolved
+            $PSBoundParameters[$name] = $resolved
+        }
+    }
+    if ($OpenSshSource -and $OpenSshZip) { throw 'Choose -OpenSshSource or -OpenSshZip, not both.' }
+    if ($TrustIddPublisher -and $IddPublisherCertificate) { throw 'Choose -TrustIddPublisher or -IddPublisherCertificate, not both.' }
+} catch {
+    Write-Error -ErrorAction Continue $_
+    exit 1
+}
+
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    # An encoded invocation preserves paths, switches and the child's exit code.
+    $invocation = '& ' + (Quote-PS $PSCommandPath)
+    foreach ($item in $PSBoundParameters.GetEnumerator()) {
+        $invocation += ' -' + $item.Key
+        if ($item.Value -is [System.Management.Automation.SwitchParameter]) {
+            $invocation += ':$' + $item.Value.IsPresent.ToString().ToLowerInvariant()
+        } else { $invocation += ' ' + (Quote-PS ([string]$item.Value)) }
+    }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($invocation))
+    $child = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -WorkingDirectory (Get-Location).Path -Verb RunAs -Wait -PassThru
+    exit $child.ExitCode
+}
+
+function Find-Python {
+    # A version probe must never trigger Python manager's automatic online install.
+    $env:PYTHON_MANAGER_AUTOMATIC_INSTALL = 'false'
+    $candidates = @($PythonExe, (Join-Path $scriptDir 'python\python.exe'))
+    $command = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($command) { $candidates += $command.Source }
+    $probe = 'import sys; print(sys.executable); sys.exit(0 if sys.version_info >= (3,15) else 1)'
+    foreach ($candidate in $candidates) {
+        if (-not $candidate) { continue }
+        try {
+            $output = & $candidate -c $probe 2>$null
+            if ($LASTEXITCODE -eq 0 -and $output) { return ([string]($output | Select-Object -Last 1)).Trim() }
+            if ($candidate -eq $PythonExe) { throw 'The selected runtime is not Python 3.15+.' }
+        } catch {
+            if ($candidate -eq $PythonExe) { throw "Cannot use -PythonExe '$PythonExe': $_" }
+        }
+    }
+    $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($launcher) {
+        try {
+            $output = & $launcher.Source -3.15 -c $probe 2>$null
+            if ($LASTEXITCODE -eq 0 -and $output) { return ([string]($output | Select-Object -Last 1)).Trim() }
+        } catch { }
+    }
+    return $null
+}
+
+function Get-SpiceAgent {
+    # Discover the installed service from its binary, independent of display language.
+    Get-CimInstance Win32_Service | Where-Object { $_.PathName -match '(?i)[\\/]vdservice\.exe(?:"|\s|$)' } | Select-Object -First 1
+}
+
+function Save-Choices {
+    $directory = Join-Path $env:ProgramData 'DuskyVM'
+    $path = Join-Path $directory 'choices.json'
+    $payload = [ordered]@{schema=1;lookingGlass=(-not $SkipLookingGlass);rdp=[bool]$EnableRdp;ssh=(-not $SkipSsh);spice=(-not $SkipSpice)} | ConvertTo-Json -Compress
+    if ((Test-Path -LiteralPath $path) -and (Get-Content -LiteralPath $path -Raw) -eq $payload) { return }
+    $null = New-Item -ItemType Directory -Force -Path $directory
+    $temporary = Join-Path $directory ([IO.Path]::GetRandomFileName())
+    try {
+        [IO.File]::WriteAllText($temporary, $payload, [Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $path) { [IO.File]::Replace($temporary, $path, $null) }
+        else { [IO.File]::Move($temporary, $path) }
+    } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary } }
+}
+
+try {
+    if (-not $SkipLookingGlass -and -not (Test-Path -LiteralPath (Join-Path $scriptDir 'setup_vdd.py') -PathType Leaf)) {
+        throw 'Copy the complete guest directory, including setup_vdd.py.'
+    }
+    if (-not $SkipSsh) {
+        if (-not (Test-Path -LiteralPath (Join-Path $scriptDir 'setup_ssh.py') -PathType Leaf)) {
+            throw 'Copy the complete guest directory, including setup_ssh.py, or pass -SkipSsh.'
+        }
+        if (-not (Get-Service sshd -ErrorAction SilentlyContinue) -and -not $OpenSshSource -and -not $OpenSshZip) {
+            throw 'Supply offline OpenSSH media with -OpenSshSource or -OpenSshZip, or use -SkipSsh. No package is downloaded automatically.'
+        }
+    }
+    $python = $null
+    if (-not $SkipLookingGlass -or -not $SkipSsh) {
+        $python = Find-Python
+        if (-not $python) {
+            if (-not $PythonIndex) { $PythonIndex = Join-Path $scriptDir 'python\index.json' }
+            if (-not (Test-Path -LiteralPath $PythonIndex -PathType Leaf)) {
+                throw 'Python 3.15+ is missing. Supply -PythonExe with a bundled runtime, or install Python install manager and supply -PythonIndex with offline runtime media. See README.md.'
+            }
+            $manager = Get-Command pymanager.exe -ErrorAction SilentlyContinue
+            if (-not $manager) { throw 'Install Python install manager before using -PythonIndex, or supply -PythonExe.' }
+            & $manager.Source install "--source=$PythonIndex" 3.15
+            if ($LASTEXITCODE -ne 0) { throw "Offline Python installation failed ($LASTEXITCODE)." }
+            $python = Find-Python
+            if (-not $python) { throw 'Python 3.15+ could not be resolved after installation.' }
+        }
+        Write-Host "Using Python: $python"
+    }
+    Save-Choices
+    $restartRequired = $false
+
+    if (-not $SkipSpice) {
+        $agent = Get-SpiceAgent
+        if (-not $agent) {
+            $mountedByUs = $false
+            try {
+                if ($VirtioIso) {
+                    $image = Get-DiskImage -ImagePath $VirtioIso
+                    if (-not $image.Attached) {
+                        Mount-DiskImage -ImagePath $VirtioIso | Out-Null
+                        $mountedByUs = $true
+                    }
+                }
+                $media = @($scriptDir)
+                $media += @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType = 5' | ForEach-Object { $_.DeviceID + '\' })
+                $installer = $media | ForEach-Object { Join-Path $_ 'virtio-win-guest-tools.exe' } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+                if (-not $installer) { throw 'Provide mounted VirtIO-Win media, -VirtioIso PATH, or virtio-win-guest-tools.exe beside this script. Use -SkipSpice to omit SPICE clipboard setup.' }
+                $process = Start-Process -FilePath $installer -ArgumentList @('/quiet', '/norestart') -Wait -PassThru
+                if ($process.ExitCode -notin @(0, 3010, 1641)) { throw "VirtIO guest tools failed ($($process.ExitCode))." }
+                if ($process.ExitCode -ne 0) { $restartRequired = $true }
+            } finally {
+                if ($mountedByUs) { Dismount-DiskImage -ImagePath $VirtioIso | Out-Null }
+            }
+            if ($restartRequired) {
+                Write-Host 'VirtIO guest tools require a restart. Restart Windows and rerun this bootstrapper to complete SSH and IDD setup.'
+                exit 3010
+            }
+            $agent = Get-SpiceAgent
+        }
+        if ($agent) {
+            Start-Service -Name $agent.Name
+            (Get-Service -Name $agent.Name).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+        } else { throw 'SPICE agent service was not installed by the supplied guest tools.' }
+    }
+
+    if ($EnableRdp) {
+        $edition = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').EditionID
+        if ($edition -notmatch '^(Professional|Enterprise|Education|IoTEnterprise)') {
+            throw "Windows edition '$edition' does not support this Remote Desktop host setup. Pro, Enterprise or Education is required."
+        }
+        $settings = Get-CimInstance -Namespace 'root/cimv2/TerminalServices' -ClassName Win32_TerminalServiceSetting
+        $result = Invoke-CimMethod -InputObject $settings -MethodName SetAllowTSConnections -Arguments @{ AllowTSConnections = [uint32]1; ModifyFirewallException = [uint32]1 }
+        if ($result.ReturnValue -ne 0) { throw "Enabling Remote Desktop failed ($($result.ReturnValue))." }
+        Start-Service TermService
+        (Get-Service TermService).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+        Write-Host 'Remote Desktop and its firewall exception are enabled. Use the Windows account password, not a Hello PIN; existing NLA policy was preserved.'
+    }
+
+    if (-not $SkipSsh) {
+        # A non-interactive PowerShell process can still attach a Windows
+        # console. Do not let Python's isatty() trigger a hidden password prompt.
+        $sshArgs = @((Join-Path $scriptDir 'setup_ssh.py'), '--non-interactive')
+        if ($OpenSshSource) { $sshArgs += @('--source', $OpenSshSource) }
+        if ($OpenSshZip) { $sshArgs += @('--openssh-zip', $OpenSshZip) }
+        & $python @sshArgs
+        if ($LASTEXITCODE -eq 3010) {
+            Write-Host 'OpenSSH requires a restart. Restart Windows and rerun this bootstrapper to complete setup.'
+            exit 3010
+        }
+        if ($LASTEXITCODE -ne 0) { throw "SSH setup failed ($LASTEXITCODE)." }
+    }
+    if (-not $SkipLookingGlass) {
+        $iddArgs = @((Join-Path $scriptDir 'setup_vdd.py'))
+        if ($IddInstaller) { $iddArgs += @('--installer', $IddInstaller) }
+        if ($IddPublisherCertificate) { $iddArgs += @('--publisher-certificate', $IddPublisherCertificate) }
+        if ($TrustIddPublisher) { $iddArgs += '--trust-installer-publisher' }
+        & $python @iddArgs
+        if ($LASTEXITCODE -eq 3010) { $restartRequired = $true }
+        elseif ($LASTEXITCODE -ne 0) { throw "Looking Glass IDD setup failed ($LASTEXITCODE)." }
+    }
+
+    if ($restartRequired) {
+        Write-Host 'Guest installers completed. Restart Windows before verifying display, input and clipboard.'
+        exit 3010
+    }
+    Write-Host 'Requested guest setup steps completed successfully.'
+    exit 0
+} catch {
+    Write-Error -ErrorAction Continue $_
+    exit 1
+}

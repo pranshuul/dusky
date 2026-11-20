@@ -11,6 +11,14 @@ tags:
 
 # SSH into QEMU/KVM Guests — Arch (Boxes vs System, Aug 2026)
 
+[[+ MOC KVM|KVM home]] · [[Reference Index — Older Names and Separate Workflows|Separate workflows]]
+
+> [!note] Linux guest review pending
+> This page retains older Linux/Boxes or example-XML instructions. It can
+> conflict with the current Hyprland/Wayland-only baseline, including older
+> clipboard/display recipes. Use [[+ MOC KVM]] for the reviewed
+> shared host setup; this page is not yet the current Linux guest guide.
+
 > [!abstract] Detection
 > `10.0.2.15` → **user-mode (`slirp`)** → **outbound-only** (host cannot SSH to `10.0.2.15` without port forward). `192.168.122.x` → **libvirt NAT `default`** → **host ↔ guest**. `192.168.1.x` → **bridge `br0`** → LAN-visible. This note gives both **correct** paths for Arch + Hyprland/UWSM.
 
@@ -130,7 +138,7 @@ sudo cp --reflink=auto /path/to/boxes-disk.qcow2 /var/lib/libvirt/images/boxes-i
 sudo chown root:root /var/lib/libvirt/images/boxes-import.qcow2
 
 virt-install --connect qemu:///system --name boxes-import --memory 4096 --vcpus 4 \
-  --disk path=/var/lib/libvirt/images/boxes-import.qcow2,format=qcow2,bus=virtio \
+  --disk path=/var/lib/libvirt/images/boxes-import.qcow2,format=qcow2,bus=virtio,driver.cache=none,driver.io=io_uring,driver.discard=unmap \
   --network network=default,model=virtio --graphics spice --video virtio --boot uefi --import
 ```
 
@@ -151,7 +159,7 @@ Keep `slirp` + `hostfwd` on **session** VM: `127.0.0.1:2222 → guest:22`, then 
 6. Just before `</domain>` add:
 
 ```xml
-<qemu:commandline>
+<qemu:commandline xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
   <qemu:arg value='-netdev'/>
   <qemu:arg value='user,id=hostssh,hostfwd=tcp:127.0.0.1:2222-:22'/>
   <qemu:arg value='-device'/>

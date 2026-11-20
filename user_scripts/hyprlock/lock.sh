@@ -1,10 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Cache the current wallpaper path
-WALLPAPER=$(awww query | grep -oP 'image: \K.*' | head -1)
-
-# Copy wallpaper to cache location (hyprlock reads static path)
-cp "$WALLPAPER" ~/.cache/current_wallpaper
-
-# Launch hyprlock
-hyprlock
+# Themes read Matugen's current wallpaper directly, including idle/sleep locks.
+# Locking must not wait for the wallpaper daemon or copy image data.
+# Serialize requests per Wayland display, before Hyprlock opens a PAM prompt.
+lock_name=${WAYLAND_DISPLAY//\//_}
+exec flock --nonblocking --conflict-exit-code 0 --no-fork \
+    "$XDG_RUNTIME_DIR/dusky-hyprlock-$lock_name.lock" hyprlock "$@"

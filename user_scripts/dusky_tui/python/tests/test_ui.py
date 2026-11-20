@@ -70,6 +70,69 @@ def app_for(schema=None, *, mode='batch', engine=None, **kwargs):
 
 
 class UITests(unittest.IsolatedAsyncioTestCase):
+    async def test_preset_poll_keeps_search_references_stable_until_dialog_closes(self):
+        app = app_for()
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            with tempfile.TemporaryDirectory() as directory:
+                app.user_presets_dir = Path(directory)
+                app.enable_user_presets = True
+                (app.user_presets_dir / 'preset.json').write_text('{"x": 1}', encoding='utf-8')
+                app._load_user_presets()
+                app._rebuild_indexes()
+                app._refresh_all_ui()
+                app.action_search()
+                await pilot.pause()
+                rows = tuple(app.schema[0])
+                (app.user_presets_dir / 'a.json').write_text('{"x": 2}', encoding='utf-8')
+                await app.watch_presets_dir()
+                self.assertEqual(len(app.schema[0]), len(rows))
+                self.assertTrue(all(before is after for before, after in zip(rows, app.schema[0])))
+                app.screen.dismiss(None)
+                await pilot.pause()
+                await app.watch_presets_dir()
+                self.assertEqual({row.label for row in app.schema[0] if row.key.startswith('__user_preset_')},
+                                 {'User: a', 'User: preset'})
+
+    async def test_discovery_waits_for_input_callback_before_replacing_rows(self):
+        setting = item('x')
+        app = app_for({0: [setting]}, engine=Engine({'x': '1'}))
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            app.prompt_string(0, 0, setting)
+            await pilot.pause()
+            replacement = [item('y'), item('x')]
+            app._apply_deferred_tabs([0], {app.default_engine_key: {'x': '1', 'y': '2'}},
+                                     {0: replacement})
+            self.assertIs(app.schema[0][0], setting)
+            app.screen.query_one(Input).value = '5'
+            await pilot.press('enter')
+            await pilot.pause(.2)
+            self.assertEqual([row.key for row in app.schema[0]], ['y', 'x'])
+            self.assertEqual(app.schema[0][1].value, 5)
+            self.assertEqual(app.schema[0][1].initial_value, 1)
+            self.assertEqual(app.pending_commits, {(0, 1)})
+            self.assertEqual(app.undo_stack[-1][0][:2], (0, 1))
+            self.assertFalse(app.engine_pool[app.default_engine_key].writes)
+
+    async def test_action_drain_preserves_bounded_output_and_cancellation(self):
+        payload = bytes(range(256)) * 80
+        for limit in (0, 1, 4096, 8192, len(payload), len(payload) + 1):
+            with self.subTest(limit=limit):
+                stream = asyncio.StreamReader()
+                stream.feed_data(payload)
+                stream.feed_eof()
+                output = await ui.DuskyTUI._drain_action_stream(stream, limit)
+                self.assertEqual(output, payload[:limit])
+                self.assertIs(type(output), bytes)
+                self.assertTrue(stream.at_eof())
+        stream = asyncio.StreamReader()
+        task = asyncio.create_task(ui.DuskyTUI._drain_action_stream(stream, 8192))
+        await asyncio.sleep(0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
     async def boot(self, app, pilot):
         for _ in range(100):
             await pilot.pause(0.01)
@@ -85,6 +148,137 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await pilot.press('j', 'k')
             self.assertEqual(app.screen.query_one(Input).value, 'jk')
+
+    async def test_inline_search_repeats_wraps_and_preserves_item_actions(self):
+        rows = [item(key, type_='bool', default=False)
+                for key in ('needle_a', 'other', 'needle_b', 'needle_c')]
+        app = app_for({0: rows})
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            await pilot.press('/')
+            await pilot.press(*'needle')
+            def selected():
+                ol = app.current_option_list
+                return ol.get_option_at_index(ol.highlighted).id
+            self.assertEqual(selected(), 'item_0_0')
+            await pilot.press('enter')
+            self.assertEqual(selected(), 'item_0_0')
+            self.assertFalse(app.query_one('#local-search', Input).display)
+            for key, index in [('enter', 2), ('n', 3), ('enter', 0), ('N', 3), ('n', 0)]:
+                await pilot.press(key)
+                self.assertEqual(selected(), f'item_0_{index}')
+            self.assertFalse(any(row.value for row in rows))
+            await pilot.press('space')
+            self.assertTrue(rows[0].value)
+            await pilot.press('escape', 'enter')
+            self.assertFalse(rows[0].value)
+            self.assertFalse(app._search_active)
+
+    async def test_inline_search_empty_missing_single_and_literal_n_keys(self):
+        app = app_for({0: [item('nN', type_='bool', default=False)]})
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            await pilot.press('/', 'n', 'N')
+            self.assertEqual(app.query_one('#local-search', Input).value, 'nN')
+            await pilot.press('enter', 'enter', 'n', 'N')
+            self.assertFalse(app.schema[0][0].value)
+            await pilot.press('/', *'missing', 'enter', 'enter', 'n', 'N')
+            self.assertFalse(app.schema[0][0].value)
+            self.assertFalse(app._search_results)
+            await pilot.press('escape', '/', 'space', 'enter', 'enter')
+            self.assertTrue(app.schema[0][0].value)
+
+    async def test_fuzzy_search_accepts_selected_rank_and_repeats_across_tabs(self):
+        app = app_for({0: [item('needle_a'), item('needle_b')], 3: [item('needle_c')]})
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            await pilot.press('ctrl+f', *'needle')
+            await pilot.pause(.1)
+            screen = app.screen
+            expected = screen.results.copy()
+            self.assertEqual(len(expected), 3)
+            await pilot.press('down')
+            self.assertEqual(screen.query_one(OptionList).highlighted, 1)
+            await pilot.press('enter')
+            def selected():
+                ol = app.current_option_list
+                parsed = app._get_item_from_id(ol.get_option_at_index(ol.highlighted).id)
+                return parsed[:2]
+            self.assertEqual(selected(), expected[1])
+            for key, position in [('enter', 2), ('n', 0), ('N', 2), ('N', 1)]:
+                await pilot.press(key)
+                self.assertEqual(selected(), expected[position])
+            self.assertFalse(app.pending_commits)
+            self.assertFalse(app._modal_active())
+            await pilot.press('escape', 'enter')
+            self.assertIsInstance(app.screen, ui.HybridInputScreen)
+
+    async def test_search_expands_nested_matches_and_skips_hidden_rows(self):
+        first = item('folder1', type_='menu', default=None, expanded=False)
+        second = item('folder2', type_='menu', default=None, parent_ref='folder1', expanded=False)
+        hidden = item('needle_missing')
+        a = item('needle_a', parent_ref='folder2')
+        b = item('needle_b', parent_ref='folder1')
+        empty_menu = item('needle_empty', type_='menu', default=None)
+        app = app_for({0: [hidden, first, second, a, b, empty_menu]}, hide_missing_items=True,
+                      engine=Engine({'needle_a': '1', 'needle_b': '2'}))
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            await pilot.press('/', *'needle', 'enter')
+            self.assertTrue(first.expanded and second.expanded)
+            self.assertEqual(app.current_option_list.last_highlighted_id, 'item_0_3')
+            await pilot.press('n')
+            self.assertEqual(app.current_option_list.last_highlighted_id, 'item_0_4')
+            await pilot.press('ctrl+f', *'needle')
+            await pilot.pause(.1)
+            self.assertEqual(app.screen.results, [(0, 3), (0, 4)])
+
+    async def test_repeat_search_does_not_capture_modal_text_or_activation(self):
+        app = app_for({0: [item('needle_a'), item('needle_b')]})
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            await pilot.press('/', *'needle', 'enter', 'space')
+            self.assertIsInstance(app.screen, ui.HybridInputScreen)
+            inp = app.screen.query_one(Input)
+            inp.value = ''
+            await pilot.press('n', 'N')
+            self.assertEqual(inp.value, 'nN')
+            await pilot.press('escape', 'n')
+            self.assertEqual(app.current_option_list.last_highlighted_id, 'item_0_1')
+
+    async def test_repeat_search_tracks_reordered_objects_and_skips_removed_results(self):
+        a, b, other = item('needle_a'), item('needle_b'), item('other')
+        app = app_for({0: [a, b, other]})
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            await pilot.press('/', *'needle', 'enter')
+            app.schema[0] = [other, b, a]
+            app._rebuild_indexes()
+            app._tab_dirty.add(0)
+            await pilot.press('n')
+            self.assertEqual(app.current_option_list.last_highlighted_id, 'item_0_1')
+            app.schema[0] = [other]
+            app._rebuild_indexes()
+            app._populate_option_list(0)
+            await pilot.press('enter', 'n', 'N')
+            self.assertFalse(app._modal_active())
+            self.assertFalse(app.pending_commits)
+
+    async def test_fuzzy_search_excludes_rows_without_option_widgets(self):
+        app = app_for({0: [item('needle_a')], 1: [item('needle_b')],
+                       2: [item('needle_c', group='shown'), item('needle_d', group='hidden')]},
+                      custom_views={1: lambda: 'Body',
+                                    2: {'view': lambda: 'Body', 'show_options': True,
+                                        'option_groups': ['shown']}})
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            await pilot.press('/', *'needle', 'ctrl+f', *'needle')
+            await pilot.pause(.1)
+            self.assertEqual(app.screen.results, [(0, 0), (2, 0)])
+            await pilot.press('enter', 'enter')
+            self.assertEqual(app._current_tab_index(), 2)
+            self.assertFalse(app.query_one('#local-search', Input).display)
+            self.assertEqual(app.current_option_list.last_highlighted_id, 'item_2_0')
 
     async def test_hybrid_preserves_custom_initial_value(self):
         app = app_for()
@@ -212,6 +406,45 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app._action_tasks)
             self.assertFalse(app._action_procs)
 
+    async def test_notification_sound_is_reaped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            player = Path(directory) / 'player'
+            player.write_text('#!/usr/bin/env python3\n')
+            player.chmod(0o755)
+            app = app_for()
+            async with app.run_test() as pilot:
+                await self.boot(app, pilot)
+                with patch.object(ui, '_AUDIO_PLAYER_CACHE', str(player)), patch.object(ui.Path, 'exists', return_value=True):
+                    ui.DuskyTUI.play_reset_sound(app)
+                for _ in range(100):
+                    await pilot.pause(0.02)
+                    if not app._action_tasks and not app._action_cleanup_tasks:
+                        break
+                self.assertFalse(app._action_tasks)
+                self.assertFalse(app._action_cleanup_tasks)
+                self.assertFalse(app._action_procs)
+
+    async def test_notification_sound_is_stopped_on_quit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            player = Path(directory) / 'player'
+            player.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n')
+            player.chmod(0o755)
+            app = app_for()
+            async with app.run_test() as pilot:
+                await self.boot(app, pilot)
+                with patch.object(ui, '_AUDIO_PLAYER_CACHE', str(player)), patch.object(ui.Path, 'exists', return_value=True):
+                    ui.DuskyTUI.play_reset_sound(app)
+                for _ in range(100):
+                    await pilot.pause(0.02)
+                    if app._action_procs:
+                        break
+                self.assertTrue(app._action_procs)
+                processes = list(app._action_procs)
+            self.assertTrue(all(process.returncode is not None for process in processes))
+            self.assertFalse(app._action_tasks)
+            self.assertFalse(app._action_cleanup_tasks)
+            self.assertFalse(app._action_procs)
+
     async def test_sparse_tab_indices(self):
         app = app_for({3: [item()]})
         async with app.run_test() as pilot:
@@ -219,39 +452,47 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app._current_tab_index(), 3)
             self.assertEqual(app.current_option_list.option_count, 1)
 
-    async def test_ready_tabs_are_warmed_before_switch(self):
+    async def test_hidden_lists_mount_once_on_first_switch(self):
         app = app_for({0: [item('first')], 1: [item('second')], 2: [item('third')]},
                       engine=Engine({'first': '1', 'second': '2', 'third': '3'}))
         async with app.run_test() as pilot:
             await self.boot(app, pilot)
-            for _ in range(100):
-                if {1, 2}.issubset(app._populated_tabs):
-                    break
-                await pilot.pause(0.01)
-            self.assertTrue({1, 2}.issubset(app._populated_tabs))
+            self.assertFalse(app.query('#list-1'))
+            self.assertFalse(app.query('#list-2'))
             self.assertEqual(app.schema[1][0].value, 2)
             app._refresh_all_ui()
+            self.assertFalse(app.query('#list-1'))
+            await asyncio.gather(app._ensure_option_list(1), app._ensure_option_list(1))
+            self.assertEqual(len(app.query('#list-1')), 1)
+            app.action_switch_tab(1)
+            await pilot.pause()
+            self.assertEqual(app.current_option_list.option_count, 1)
+            app.action_switch_tab(0)
+            await pilot.pause()
+            app._refresh_all_ui()
             for _ in range(100):
-                if not ({1, 2} & app._tab_dirty):
+                if 1 not in app._tab_dirty:
                     break
                 await pilot.pause(0.01)
-            self.assertFalse({1, 2} & app._tab_dirty)
+            self.assertNotIn(1, app._tab_dirty)
+            self.assertFalse(app.query('#list-2'))
             with patch.object(app, '_populate_option_list', wraps=app._populate_option_list) as populate:
                 app.action_switch_tab(1)
                 await pilot.pause()
                 self.assertFalse(any(call.args[0] == 1 for call in populate.call_args_list))
 
-    async def test_discovered_tab_is_warmed_after_deferred_load(self):
+    async def test_discovered_tab_renders_on_first_visit(self):
         app = app_for({0: [item('first')], 1: []})
         async with app.run_test() as pilot:
             await self.boot(app, pilot)
             self.assertNotIn(1, app._populated_tabs)
             app._apply_deferred_tabs([1], {app.default_engine_key: {'second': '4'}},
                                      {1: [item('second')]})
-            for _ in range(100):
-                if 1 in app._populated_tabs:
-                    break
-                await pilot.pause(0.01)
+            self.assertNotIn(1, app._populated_tabs)
+            self.assertFalse(app.query('#list-1'))
+            self.assertEqual(app.schema[1][0].value, 4)
+            app.action_switch_tab(1)
+            await pilot.pause()
             self.assertIn(1, app._populated_tabs)
             self.assertEqual(app.query_one('#list-1', ui.ConfigOptionList).option_count, 1)
             self.assertEqual(app.schema[1][0].value, 4)
@@ -272,10 +513,10 @@ class UITests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test() as pilot:
             await self.boot(app, pilot)
             for _ in range(100):
-                if 1 in app._populated_tabs:
+                if app.schema[1] and app.schema[1][0]._initial_loaded:
                     break
                 await pilot.pause(0.01)
-            self.assertIn(1, app._populated_tabs)
+            self.assertFalse(app.query('#list-1'))
             self.assertEqual(app.schema[1][0].value, 4)
             self.assertEqual(engine.reads, 1)
 
@@ -303,10 +544,10 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             finally:
                 release.set()
             for _ in range(100):
-                if 1 in app._populated_tabs:
+                if app.schema[1] and app.schema[1][0]._initial_loaded:
                     break
                 await pilot.pause(0.01)
-            self.assertIn(1, app._populated_tabs)
+            self.assertFalse(app.query('#list-1'))
             self.assertEqual(app.schema[1][0].value, 5)
             self.assertEqual(engine.reads, 2)
 
@@ -561,13 +802,76 @@ class UITests(unittest.IsolatedAsyncioTestCase):
             target = Path(directory) / 'theme.json'
             target.write_text('{"accent": "#123456"}')
             app = app_for(theme_path=str(target))
+            self.assertEqual(app.current_theme.primary, '#123456')
+            initial_theme = app.theme
             async with app.run_test() as pilot:
                 await self.boot(app, pilot)
+                self.assertEqual(app.theme, initial_theme)
+                self.assertEqual(app.current_theme.primary, '#123456')
                 old = target.stat().st_mtime
                 target.write_text('{"accent": "#abcdef"}')
                 os.utime(target, (old - 10, old - 10))
                 await app.watch_theme_file()
                 self.assertEqual(app.theme_colors['accent'], '#abcdef')
+                self.assertEqual(app.current_theme.primary, '#abcdef')
+                self.assertNotEqual(app.theme, initial_theme)
+
+    async def test_external_reload_hides_removed_setting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'config'
+            target.write_text('initial')
+            engine = Engine({'x': 1})
+            engine.target_path = str(target)
+            app = app_for(engine=engine, hide_missing_items=True)
+            async with app.run_test() as pilot:
+                await self.boot(app, pilot)
+                await app.watch_target_file()
+                target.write_text('changed')
+                engine.state.clear()
+                await app.watch_target_file()
+                self.assertFalse(app.schema[0][0].exists_in_target)
+                self.assertEqual(app.current_option_list.option_count, 0)
+
+    async def test_named_custom_view_respects_option_groups(self):
+        app = app_for({0: [item('visible', group='Visible'), item('hidden', group='Hidden')]},
+                      custom_views={'Tab 0': {'view': 'Content', 'show_options': True,
+                                              'option_groups': ['Visible']}})
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            ids = {option.id for option in app.current_option_list.options}
+            self.assertIn('item_0_0', ids)
+            self.assertNotIn('item_0_1', ids)
+
+    async def test_help_mounts_once_on_demand_and_tracks_selection(self):
+        app = app_for({0: [item('first', extended_help='First documentation'),
+                           item('second', extended_help='Second documentation')]})
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            self.assertFalse(app.query('#help-markdown'))
+            await app.action_toggle_help()
+            await pilot.pause()
+            markdown = app.query_one('#help-markdown', ui.Markdown)
+            self.assertEqual(markdown._dusky_help_text, 'First documentation')
+            app.current_option_list.highlighted = 1
+            await pilot.pause()
+            self.assertEqual(markdown._dusky_help_text, 'Second documentation')
+            await app.action_toggle_help()
+            await app.action_toggle_help()
+            self.assertEqual(len(app.query('#help-markdown')), 1)
+
+    async def test_null_state_is_present_during_boot_and_refresh(self):
+        setting = item('nullable', type_='string', default='default')
+        engine = Engine({'nullable': None})
+        app = app_for({0: [setting]}, engine=engine, hide_missing_items=True)
+        async with app.run_test() as pilot:
+            await self.boot(app, pilot)
+            self.assertTrue(setting.exists_in_target)
+            self.assertIsNone(setting.value)
+            app._apply_refreshed_states({app.default_engine_key: {}})
+            self.assertFalse(setting.exists_in_target)
+            app._apply_refreshed_states({app.default_engine_key: {'nullable': None}})
+            self.assertTrue(setting.exists_in_target)
+            self.assertIsNone(setting.value)
 
     async def test_large_decimal_input_is_exact(self):
         app = app_for()
@@ -663,17 +967,82 @@ class UITests(unittest.IsolatedAsyncioTestCase):
 
 
 class UtilityTests(unittest.TestCase):
+    def test_partial_preset_preserves_omitted_settings_and_match_ratio(self):
+        visual, hardware = item('visual'), item('hardware')
+        preset = item('style', type_='preset', default=None,
+                      preset_payload={'visual': 2}, preset_partial=True)
+        app = app_for({0: [visual, hardware, preset]})
+        app._states[app.default_engine_key] = {'visual': '1', 'hardware': '9'}
+        app._loaded_engines.add(app.default_engine_key)
+        app._apply_states_to_tab(0, app._states)
+        app._mark_boot_complete_if_done()
+        app.apply_preset(preset)
+        self.assertEqual((visual.value, hardware.value), (2, 9))
+        self.assertEqual(set(app.pending_commits), {(0, 0)})
+        self.assertEqual(app._get_preset_match_ratio(preset), 1.0)
+        hardware.value = 13
+        app._preset_matrix.on_item_changed(hardware)
+        self.assertEqual(app._get_preset_match_ratio(preset), 1.0)
+        app._preset_matrix.ingest_items([hardware])
+        self.assertEqual(app._get_preset_match_ratio(preset), 1.0)
+        visual.value = 1
+        app._preset_matrix.on_item_changed(visual)
+        self.assertEqual(app._get_preset_match_ratio(preset), 0.0)
+
+    def test_snapshot_and_factory_presets_still_reset_omitted_values(self):
+        for payload, partial in (({'visual': 2}, False), ({'__ALL_DEFAULTS__': True}, True)):
+            with self.subTest(payload=payload):
+                visual, hardware = item('visual'), item('hardware')
+                preset = item('style', type_='preset', default=None,
+                              preset_payload=payload, preset_partial=partial)
+                app = app_for({0: [visual, hardware, preset]})
+                app._states[app.default_engine_key] = {'visual': '1', 'hardware': '9'}
+                app._loaded_engines.add(app.default_engine_key)
+                app._apply_states_to_tab(0, app._states)
+                app._mark_boot_complete_if_done()
+                app.apply_preset(preset)
+                self.assertEqual(hardware.value, 0)
+                self.assertEqual(visual.value, 0 if partial else 2)
+                self.assertEqual(app._get_preset_match_ratio(preset), 1.0)
+
+    def test_boot_readiness_initializes_hidden_model_before_lazy_rendering(self):
+        visible, hidden = item('x'), item('hidden')
+        preset = item('preset', type_='preset', default=None, preset_payload={'x': 1, 'hidden': 9})
+        app = app_for({0: [visible, preset], 1: [hidden]})
+        app.telemetry_engine = None
+        app._states[app.default_engine_key] = {'x': '1', 'hidden': '7'}
+        app._loaded_engines.add(app.default_engine_key)
+        app._apply_states_to_tab(0, app._states)
+        original_rebuild = ui.PresetMatchMatrix.rebuild
+        with patch.object(ui.PresetMatchMatrix, 'rebuild', autospec=True,
+                          side_effect=original_rebuild) as rebuild:
+            app._mark_boot_complete_if_done()
+            app._mark_boot_complete_if_done()
+        self.assertTrue(app._boot_complete)
+        self.assertEqual(app._tab_data_ready, {0, 1})
+        self.assertNotIn(1, app._tab_populated)
+        self.assertEqual(hidden.value, 7)
+        self.assertEqual(hidden.initial_value, 7)
+        self.assertEqual(app._committed[(1, 0)], 7)
+        self.assertTrue(hidden.exists_in_target)
+        self.assertEqual(app._get_preset_match_ratio(preset), .5)
+        self.assertEqual(rebuild.call_count, 1)
+        app.apply_preset(preset)
+        self.assertEqual(hidden.value, 9)
+        self.assertEqual(hidden.initial_value, 7)
+        self.assertIn((1, 0), app.pending_commits)
+
     def test_color_malformed_does_not_raise(self):
-        self.assertEqual(ui.color_to_rgb('hsl(.., 50%, 50%)'), (128, 128, 128))
+        self.assertIsNone(ui.parse_literal_color('hsl(.., 50%, 50%)'))
 
     def test_color_rgb_clamped(self):
-        self.assertEqual(ui.color_to_rgb('rgb(999, 10, 0)'), (255, 10, 0))
+        self.assertEqual(ui.parse_literal_color('rgb(999, 10, 0)').rgb, (255, 10, 0))
 
     def test_color_negative_hue(self):
-        self.assertEqual(ui.color_to_rgb('hsl(-120, 100%, 50%)'), (0, 0, 255))
+        self.assertEqual(ui.parse_literal_color('hsl(-120, 100%, 50%)').rgb, (0, 0, 255))
 
     def test_color_short_alpha_preserved(self):
-        self.assertEqual(ui.format_rgb('Red', 'hex', '#1234'), '#ff000044')
+        self.assertEqual(ui.adjust_color_hue('#f004', 15), '#ff400044')
 
     def test_override_path_resolution_cached(self):
         app = app_for()

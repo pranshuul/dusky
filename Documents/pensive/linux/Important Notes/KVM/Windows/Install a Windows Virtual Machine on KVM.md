@@ -1,64 +1,74 @@
 ---
-title: "Windows Install — Load VirtIO Drivers & Guest Tools"
+title: "Install Windows 11 — disk, NIC and guest drivers"
 tags:
   - kvm
+  - manual
   - windows
-  - virtio
-  - arch
+reviewed: 2026-10-25
 ---
 
-# Windows Install — Load VirtIO Drivers & Guest Tools
+# Install Windows 11 — disk, NIC and guest drivers
 
-> [!info] Context
-> You booted the VM after `Customize configuration before install` + `VirtIO` disk/NIC ([[Configure the Storage]] / [[Configure Virtual Network Interface]]) + second CDROM `virtio-win.iso` ([[Mount the VirtIO-Win ISO Image]]). Windows *will* show empty drive list — it has no virtio driver yet.
+[[+ MOC KVM|KVM home]] · [[+ MOC Windows Installation Through Virt Manager|Windows route]]
 
-## 1. Storage driver (mandatory)
+Complete [[+ MOC Windows Installation Through Virt Manager|virtual hardware]]
+first. Boot the Windows ISO in the retained VGA/SPICE console. The Windows
+installer should see the chosen firmware/TPM and meet its resource requirements.
+A VirtIO boot disk can be invisible until its matching driver is loaded; a SATA
+inbox-driver disk does not require that step.
 
-On **Where do you want to install Windows?** (empty list):
+## Storage driver during Setup
 
-1. **Load driver → Browse** → **CD Drive (E:)** (virtio-win)
-2. Expand **`viostor` → `w10` or `w11` → `amd64`** → **OK**
-3. Select **Red Hat VirtIO SCSI controller** → **Next**
+At the installation disk picker, choose **Load driver**, browse the attached
+VirtIO-Win DVD, and select the correct Windows version/architecture directory:
 
-Drive appears → select → **Next** (installer copies; auto-reboot).
+| Chosen virtual controller | Driver directory |
+|---|---|
+| VirtIO block disk (`bus='virtio'`) | `viostor` |
+| VirtIO SCSI controller with SCSI disk | `vioscsi` |
+| Emulated SATA | Windows inbox AHCI driver |
 
-## 2. Network driver (optional, not recommended during Setup)
+For an x64 Windows 11 guest, media commonly uses `w11/amd64` below the driver
+name. Inspect the media; do not select vioscsi just because its display label
+contains “SCSI” while your device is VirtIO block. After loading the matching
+driver, confirm the intended disk and capacity before installing.
 
-Needed only if you need LAN *during* OOBE. Same flow → **`NetKVM` → `w10|w11` → `amd64`** → **OK**.
+## Networking during Setup/OOBE
 
-Otherwise skip; Windows Update or later `virtio-win-guest-tools` provides it.
+VirtIO networking needs NetKVM. If Setup offers driver browsing, use the media's
+matching `NetKVM` directory. A setup console can also stage the matching INF with
+`pnputil /add-driver PATH_TO_INF /install`; inspect `pnputil /?` and replace the
+path with the actual DVD drive/architecture. Keep the INF, catalog and driver
+files together. An e1000e inbox NIC is another explicit installation choice.
+Do not assume current Windows OOBE can always complete without network/account
+access; edition/build requirements vary.
 
-## 3. Guest Tools (first desktop boot)
+## First desktop: guest tools
 
-After OOBE login:
+Open the VirtIO DVD in File Explorer, run `virtio-win-guest-tools.exe` as
+Administrator, select the required components and follow its restart request.
+It can install/update drivers and guest agents; confirm the selected components
+rather than assuming every optional driver was installed. Do not use repeated
+blind driver uninstall/reinstall cycles for a missing cursor.
 
-1. **File Explorer → CD Drive (E:)** (virtio-win)
-2. Run **`virtio-win-guest-tools.exe`** (not the per-arch MSI unless debugging).
+Check Device Manager for the actual disk/NIC devices and QEMU Guest Agent/SPICE
+services. From Linux:
 
-Installs:
-- `qxl`/`virtio-gpu` video (fallback when `virtio` video in Q35)
-- `spice-agent` (clipboard) + `QEMU Guest Agent` + `viostor`/`NetKVM`/`vioinput`/`viofs`
+```sh
+virsh -c qemu:///system qemu-agent-command win11 '{"execute":"guest-ping"}'
+virsh -c qemu:///system domifaddr win11 --source agent
+```
 
-> [!tip] Which file?
-> `virtio-win-guest-tools.exe` is the meta-installer. Per-arch MSIs are partial. If cursor vanishes after `vioinput`, uninstall via **Device Manager → Mice → Uninstall** then re-run `virtio-win-guest-tools` (post-reboot).
+If ballooning was selected, verify its driver and BalloonService. For folder
+sharing install WinFsp/viofs separately as needed. Looking Glass IDD has its own
+paired installer; do not assume a VirtIO video driver alone supplies it.
 
-## 4. Auto-resize display
-
-With Guest Tools installed:
-
-1. `virt-manager` viewer → **View → Scale Display** → ✅ **Auto resize VM with window**
-2. Resize window → guest resolution snaps.
-
-## 5. Cleanup — remove installer ISO
-
-Shut off VM:
-
-1. `virt-manager` main → VM **Shutoff**
-2. Lightbulb → **SATA CDROM 1** (Windows ISO) → **Disconnect / remove**
-3. **SATA CDROM 2** (`virtio-win.iso`) → **keep** attached (handy for driver reinstall) or Remove
-
+Eject the Windows installer when no longer needed and boot the installed disk.
+Preserve the driver media for future offline use. A historical tools screenshot:
 ![[Pasted image 20250726223648.png]]
 
-> [!success] Ready — proceed to [[Optimize Windows Performance]] + shared folder / TPM passthrough notes. For scripted labs, `30_kvm_vm_deploy.py` attaches both ISOs via `virt-install --disk path=…,device=cdrom,bus=sata,readonly=on` and boots `uefi,cdrom,hd,menu=on`.
-
-See: [[Configure Windows Virtual Hardware]], [[Enable Trusted Platform Module (TPM)]].
+First verify the baseline OS/devices/QGA with [[Verification — Windows VM]].
+Then return to [[+ MOC Windows Installation Through Virt Manager#4. Pick desktop and management access|desktop and management choices]],
+and repeat the relevant checks after adding each selected feature.
+Sources: [VirtIO-Win driver installation](https://github.com/virtio-win/kvm-guest-drivers-windows/wiki/Driver-installation),
+[Microsoft PnPUtil](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/pnputil-command-syntax).

@@ -514,7 +514,7 @@ hl.window_rule({
 --- Dusky Screentime TUI ---
 hl.window_rule({
   name = "dusky_screentime_tui",
-  match = { class = "^(dusky_screentime_tui|screentime_tui\\.py)$" },
+  match = { class = "^(dusky_screentime|dusky_screentime_tui|screentime_tui\\.py)$" },
   float = true,
   size = {"(monitor_w*0.95)", "(monitor_h*0.95)"},
   center = true,
@@ -950,7 +950,7 @@ hl.window_rule({
     name = "kitty",
     match = { class = "^(dusky_window_rules.sh)$" },
     float = true,
-    size = {1000, 750},
+    size = {"monitor_w * 0.68", "monitor_h * 0.94"},
     center = true
 })
 
@@ -1176,7 +1176,7 @@ hl.window_rule({
 hl.window_rule({
     name = "controlcenter",
     match = {
-        class = "^(com\\.github\\.dusky\\.controlcenter)$",
+        class = "^(com\\.github\\.dusky\\.controlcenter|dusky_center)$",
     },
     float = true,
     size = {670, "(monitor_h*0.90)"},
@@ -1196,22 +1196,6 @@ hl.window_rule({
     size = {630, "(monitor_h*0.90)"},
     center = true,
     animation = "slide up",
-    workspace = "unset",
-    focus_on_activate = true
-})
-
---- Dusky_QuickPanal Script ---
-hl.window_rule({
-    name = "dusky_quickpanalpy",
-    match = {
-        class = "^(dusky_quickpanal\\.py)$",
-    },
-    float = true,
-    animation = "slide right",
-    no_dim = true,
-    rounding = 20,
-    move = {"(monitor_w-window_w-20)", "(monitor_h-window_h-20)"},
-    border_size = 0,
     workspace = "unset",
     focus_on_activate = true
 })
@@ -1455,7 +1439,7 @@ hl.window_rule({
         class = "^(waybar_tui)$",
     },
     float = true,
-    size = {720, 690},
+    size = {746, 690},
     -- size = {"monitor_w * 0.5523", "monitor_h * 0.9583"},
 })
 
@@ -1494,7 +1478,7 @@ hl.window_rule({
 --- Dusky Papers ---
 hl.layer_rule({
     name = "dusky_papers",
-    match = { namespace = "dusky-papers" },
+    match = { namespace = "^dusky_papers$" },
     blur = true,
     xray = false, -- Blur the windows underneath, rather than only the wallpaper.
     ignore_alpha = 0.0
@@ -1548,8 +1532,8 @@ hl.window_rule({
 
 --- Dusky Polkit Agent ---
 hl.window_rule({
-    name = "pin-dusky-polkit-agent",
-    match = { class = "^(dusky-polkit)$" },
+    name = "pin_dusky_polkit_agent",
+    match = { class = "^(dusky_polkit|org\\.dusky\\.polkit)$" },
     float = true,
     center = true,
     size = {640, 240},
@@ -1802,17 +1786,6 @@ hl.window_rule({
     size = {816, 537}
 })
 
--- -- satty ---
-hl.window_rule({
-    name = "comgabmsatty",
-    match = { class = "^(com\\.gabm\\.satty)$" },
-    center = true,
-    float = true,
-    opaque = true,
-    animation = "slide down",
-    size = {1115, 624}
-})
-
 -- -----------------------------------------------------------------------------
 -- Layer Rules like rofi, awww, wlogout (check using `hyprctl layers`)
 -- -----------------------------------------------------------------------------
@@ -1869,6 +1842,16 @@ hl.layer_rule({
     ignore_alpha = 0.0
 })
 
+-- Dusky Overview Layer Rule
+hl.layer_rule({
+    name = "dusky_overview_blur",
+    match = { namespace = "dusky_overview" },
+    blur = true,
+    xray = false,
+    ignore_alpha = 0.0,
+    no_anim = true
+})
+
 -- SMART GAPS (Disabled / Examples)
 -- -----------------------------------------------------------------------------
 -- These blocks are retained from your config as commented examples. They show
@@ -1883,7 +1866,7 @@ hl.layer_rule({
 
 --- 1. Behavior for Single Tiled Window (w[tv1]) ---
 -- A. Workspace Rule: Remove gaps when only 1 tiled window is visible
--- hl.workspace_rule({ name = "w[tv1]", gapsout = 0, gapsin = 0 })
+-- hl.workspace_rule({ workspace = "w[tv1]", gaps_out = 0, gaps_in = 0 })
 
 -- B. Window Rule: Remove border & rounding for windows on that workspace
 -- hl.window_rule({
@@ -1899,7 +1882,7 @@ hl.layer_rule({
 --- 2. Behavior for Maximized Layout State (f[1]) ---
 
 -- A. Workspace Rule: Remove gaps when workspace is maximized
--- hl.workspace_rule({ name = "f[1]", gapsout = 0, gapsin = 0 })
+-- hl.workspace_rule({ workspace = "f[1]", gaps_out = 0, gaps_in = 0 })
 
 -- B. Window Rule: Remove border & rounding for windows on maximized workspace
 -- hl.window_rule({
@@ -2011,4 +1994,23 @@ hl.window_rule({
     border_size = 0,
     no_dim = true,
     no_initial_focus = true
+})
+
+-- Dusky Tray: compact regular Wayland window; content determines its size.
+-- The shared focus-grab helper handles outside clicks without a backdrop.
+hl.window_rule({
+    name = "dusky_tray_window",
+    match = { class = "^dusky_tray$" },
+    float = true,
+    pin = true,
+    move = {"monitor_w-window_w-20", "monitor_h-window_h-20"},
+    animation = "slide bottom",
+    border_size = 0,
+    rounding = 20,
+    rounding_power = 2.0,
+    no_shadow = true,
+    decorate = true,
+    no_blur = false,
+    no_dim = true,
+    persistent_size = false,
 })

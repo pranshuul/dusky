@@ -1,5 +1,5 @@
 /*
- * Dusky Template Generator — content.js (Gecko 156+)
+ * Dusky Template Generator — content.js (Gecko 157.0.1+)
  *
  * Two jobs, one file:
  *   1. scan()  — colour-token scanner behind the popup's Auto-map button;
@@ -12,13 +12,13 @@
  *       @layer dusky.preview, dusky.live;
  *   CSS Cascade 5 reverses layer order for !important declarations: the
  *   EARLIEST layer wins, and layered !important beats unlayered !important.
- *   Therefore  preview  ≻  live  ≻  the site's own !important rules,
- *   independently of specificity, source order, and anything the page does to
- *   <head>. Hover preview is consequently identical in pick and edit mode.
+ *   Therefore preview beats live, and both beat unlayered author rules.
+ *   Inline !important and important rules in earlier site layers can still win.
+ *   Pick and edit mode share the same preview engine.
  *
  * Reliability contract:
  *   · nothing is written unless the picks region was read first (hydrated);
- *   · every write carries base_rev; a conflict re-reads, merges (local wins
+ *   · every write carries base_rev; a conflict re-reads, merges (local edits win
  *     per key) and retries with backoff;
  *   · writes are serialised and coalesced by generation — a burst is one write.
  *
@@ -71,20 +71,27 @@
     ["error", "Error"],
     ["on_error", "On error"],
     ["error_container", "Error container"],
+    ["on_error_container", "On error container"],
+    ["inverse_primary", "Inverse primary"],
+    ["on_primary_fixed", "On primary fixed"],
+    ["on_primary_fixed_variant", "On primary fixed variant"],
+    ["secondary_fixed", "Secondary fixed"],
+    ["on_secondary_fixed", "On secondary fixed"],
+    ["tertiary_fixed", "Tertiary fixed"],
+    ["tertiary_fixed_dim", "Tertiary fixed dim"],
+    ["on_tertiary_fixed", "On tertiary fixed"],
+    ["on_tertiary_fixed_variant", "On tertiary fixed variant"],
+    ["surface_tint", "Surface tint"],
+    ["source_color", "Source color"],
+    ["scrim", "Scrim"],
+    ["shadow", "Shadow"],
   ];
   const TOKEN_NAMES = new Set(TOKENS.map(([t]) => t));
 
   /* Everything Matugen itself injects. Exact names only: a prefix regex also
    * swallows real site tokens such as --error_bg, --surface_alt, --primary_hover. */
-  const PALETTE_OWNED = new Set([
-    ...TOKEN_NAMES,
-    "error_container", "on_error_container", "inverse_primary",
-    "on_primary_fixed", "on_primary_fixed_variant",
-    "secondary_fixed", "on_secondary_fixed",
-    "tertiary_fixed", "tertiary_fixed_dim", "on_tertiary_fixed", "on_tertiary_fixed_variant",
-    "scrim", "shadow", "source_color", "surface_tint",
-  ]);
-  const PALETTE_SUFFIX = /_(rgb|rgba|hex|hsl|raw|strip)$/;
+  const PALETTE_OWNED = new Set(TOKEN_NAMES);
+  const PALETTE_SUFFIX = /_(rgb_comma|rgb|rgba|hex|hsl|raw|strip)$/;
   /* Framework internals that are never site design tokens. --mui-* and --wp--*
    * are deliberately NOT here: those are mappable palettes. */
   const NOISE_RE = /^--(tw-|fa-|dusky|darkreader|chakra-emotion)/i;
@@ -92,7 +99,7 @@
   const skipVar = (name) => {
     if (typeof name !== "string" || !name.startsWith("--")) return true;
     if (NOISE_RE.test(name)) return true;
-    return PALETTE_OWNED.has(name.slice(2).toLowerCase().replace(PALETTE_SUFFIX, ""));
+    return PALETTE_OWNED.has(name.slice(2).replace(PALETTE_SUFFIX, ""));
   };
 
   const paletteLoaded = () =>
@@ -106,11 +113,13 @@
     "pointer-events": "none", isolation: "isolate",
   })) hostEl.style.setProperty(p, v, "important");
   const root = hostEl.attachShadow({ mode: "closed" });
+  const theme = globalThis.__duskyTemplateTheme;
+  theme.apply(hostEl);
 
   /* ══ Perceptual colour engine ═══════════════════════════════════════ */
-  /* The probe lives in a detached element inside the closed root: the page can
-   * neither see it nor style it, and it never triggers layout. */
-  let colorProbe = null;
+  /* A detached style object handles ordinary colours; a reusable shadow node
+   * resolves context-dependent colours and a one-pixel canvas converts to sRGB. */
+  let colorProbe = null, colorCanvas = null;
   const getProbe = () => (colorProbe ??= document.createElement("span"));
   const dropProbe = () => { colorProbe = null; };
 
@@ -121,7 +130,7 @@
   const RGB_TRIPLET = /^(\d{1,3})[,\s]+(\d{1,3})[,\s]+(\d{1,3})$/;
   const KEYWORDISH = /^(inherit|initial|unset|revert|revert-layer|transparent|currentcolor|none)$/i;
 
-  function parseCssColor(raw) {
+  function parseCssColor(raw, context = document.documentElement) {
     if (typeof raw !== "string") return null;
     const v = raw.trim();
     if (!v || KEYWORDISH.test(v)) return null;
@@ -130,7 +139,7 @@
     const triplet = !hsl && v.match(RGB_TRIPLET);
     if (triplet) {
       const [, r, g, b] = triplet.map(Number);
-      return r <= 255 && g <= 255 && b <= 255 ? { r, g, b, a: 1, shape: "rgb-triplet" } : null;
+      return r <= 255 && g <= 255 && b <= 255 ? { r, g, b, a: 1, shape: v.includes(",") ? "rgb-comma" : "rgb-triplet" } : null;
     }
     /* Reject non-colours early so font/spacing variables never leak through. */
     if (!(hsl || IS_COLOR_SYNTAX.test(v) || CSS.supports("color", v))) return null;
@@ -143,8 +152,17 @@
     /* Detached elements have no computed style, so resolve through the CSSOM:
      * style.color is already serialised by the parser into a canonical form. */
     const serialised = probe.style.color;
-    const match = RGB_OUT.exec(serialised) ?? RGB_OUT.exec(resolveViaRoot(serialised));
-    if (!match) return null;
+    const match = RGB_OUT.exec(serialised);
+    if (!match) {
+      const ctx = (colorCanvas ??= new OffscreenCanvas(1, 1).getContext("2d", {
+        colorSpace: "srgb", willReadFrequently: true,
+      }));
+      ctx.clearRect(0, 0, 1, 1);
+      ctx.fillStyle = resolveViaRoot(serialised, context);
+      ctx.fillRect(0, 0, 1, 1);
+      const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+      return { r, g, b, a: a / 255, shape: hsl ? "hsl-triplet" : "color" };
+    }
     const [, rs, gs, bs, as] = match;
     const alpha = as === undefined ? 1 : (as.endsWith("%") ? parseFloat(as) / 100 : parseFloat(as));
     return {
@@ -153,21 +171,29 @@
     };
   }
 
-  /* Canonicalise exotic colour syntaxes (oklch, color-mix, light-dark) to rgb()
-   * using a one-shot computed-value round trip on the shadow root's own node. */
+  /* Resolve context-dependent colours before canvas converts their colour space. */
   let resolver = null;
-  function resolveViaRoot(value) {
-    if (!resolver?.isConnected) {
+  function resolveViaRoot(value, context) {
+    if (!resolver) {
       resolver = document.createElement("i");
       resolver.style.cssText = "display:none!important";
       root.append(resolver);
     }
-    resolver.style.color = "";
-    resolver.style.color = value;
-    return getComputedStyle(resolver).color ?? "";
+    const detached = !hostEl.isConnected;
+    if (detached) document.documentElement.append(hostEl);
+    try {
+      const cs = getComputedStyle(context);
+      resolver.style.color = cs.color;
+      resolver.style.colorScheme = cs.colorScheme;
+      resolver.style.backgroundColor = "";
+      resolver.style.backgroundColor = value;
+      return getComputedStyle(resolver).backgroundColor;
+    } finally {
+      if (detached) hostEl.remove();
+    }
   }
 
-  const srgb = (c) => ((c /= 255), c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const srgb = (c) => ((c /= 255), c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
   const luminance = (r, g, b) => 0.2126 * srgb(r) + 0.7152 * srgb(g) + 0.0722 * srgb(b);
 
   function chromaHue(r, g, b) {
@@ -314,13 +340,33 @@
   }
 
   function classifyByValueAndName(name, col) {
-    const n = name.slice(2).toLowerCase().replaceAll(/[_.]/g, "-");
+    const n = name.slice(2).replace(/([a-z\d])([A-Z])/g, "$1-$2").toLowerCase().replaceAll(/[_.]/g, "-");
     const lum = luminance(col.r, col.g, col.b);
     const { chroma, hue } = chromaHue(col.r, col.g, col.b);
+    const fg = /(?:^|-)(?:fg|foreground|text|ink)(?:-|$)/.test(n);
+    const bg = /(?:^|-)(?:bg|background|canvas|surface)(?:-|$)/.test(n);
+    const muted = /(?:muted|secondary|dim|subtle|caption|hint|disabled|placeholder)/.test(n);
 
+    // Material has no success/warning roles. Preserve those status colours automatically.
+    if (/(?:^|-)(?:success|positive|warning|attention)(?:-|$)/.test(n)) return "";
     if (/(error|danger|destructive|critical|invalid)/.test(n)) return "error";
     if (/(border|divider|separator|rule|stroke)/.test(n)) return lum > 0.3 ? "outline" : "outline_variant";
     if (/outline/.test(n)) return "outline";
+    if (fg) {
+      if (/(?:^|-)on-(?:primary|accent|emphasis)(?:-|$)/.test(n) ||
+          (/(button|btn|badge|control)/.test(n) && /primary/.test(n))) return "on_primary";
+      if (/(link|accent|brand)/.test(n)) return "primary";
+      return muted ? "on_surface_variant" : "on_surface";
+    }
+    if (bg) {
+      if (/(primary|brand|accent)/.test(n)) return muted || /container/.test(n) ? "primary_container" : "primary";
+      if (/(inset|sunken|lowest)/.test(n)) return "surface_container_lowest";
+      if (/(hover|active|bright|emphasis)/.test(n)) return "surface_bright";
+      if (/(modal|dialog|popover|dropdown|elevated|overlay)/.test(n)) return "surface_container_high";
+      if (muted) return "surface_container_low";
+      if (/(card|panel|container|sidebar|menu)/.test(n)) return "surface_container";
+      return "background";
+    }
     if (/(link|primary|brand|accent|cta)/.test(n) && chroma >= 0.1) return "primary";
 
     if (chroma >= 0.15) {
@@ -354,21 +400,155 @@
       if (rule.cssRules) {
         try { walkRules(rule.cssRules, onStyleRule); } catch { /* opaque */ }
       }
-      if (rule.selectorText && rule.style) onStyleRule(rule);
+      if (rule.style && (rule.selectorText || rule instanceof CSSNestedDeclarations)) onStyleRule(rule);
     }
   }
 
+  const COLOR_PROP = /^(?:background(?:-color|-image)?|color|border(?:-(?:top|right|bottom|left|block(?:-start|-end)?|inline(?:-start|-end)?))?(?:-color)?|fill|stroke|box-shadow|text-shadow|outline(?:-color)?|caret-color|accent-color|text-decoration(?:-color)?|column-rule(?:-color)?)$/;
+  const VAR_NAME = /^--(?:[-\w\u0080-\u{10FFFF}]|\\(?:[\da-fA-F]{1,6}[\t\n\f\r ]?|[^\n\r\f]))+/u;
+  function variableReferences(value) {
+    const refs = [];
+    for (let i = 0; i < value.length; i++) {
+      if (value.startsWith("/*", i)) {
+        const end = value.indexOf("*/", i + 2);
+        if (end < 0) break;
+        i = end + 1;
+        continue;
+      }
+      if (value[i] === '"' || value[i] === "'") {
+        const quote = value[i++];
+        for (; i < value.length; i++) {
+          if (value[i] === "\\") i++;
+          else if (value[i] === quote) break;
+        }
+        continue;
+      }
+      if (value[i] === "\\") { i++; continue; }
+      if (value.slice(i, i + 4).toLowerCase() !== "var(" ||
+          (i && /[-\w\u0080-\uFFFF]/u.test(value[i - 1]))) continue;
+      let start = i + 4;
+      while (start < value.length) {
+        if (/[\t\n\f\r ]/.test(value[start])) { start++; continue; }
+        if (!value.startsWith("/*", start)) break;
+        const end = value.indexOf("*/", start + 2);
+        if (end < 0) break;
+        start = end + 2;
+      }
+      const raw = VAR_NAME.exec(value.slice(start))?.[0];
+      if (!raw) continue;
+      const name = raw.replace(/\\([\da-fA-F]{1,6})[\t\n\f\r ]?|\\(.)/gu, (_, hex, char) => {
+        if (!hex) return char;
+        const cp = Number.parseInt(hex, 16);
+        return String.fromCodePoint(cp && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF) ? cp : 0xFFFD);
+      });
+      refs.push({ name, start, end: start + raw.length });
+      i = start + raw.length - 1;
+    }
+    return refs;
+  }
+  const varRefs = (value) => variableReferences(value).map((ref) => ref.name);
+
+  /* Pending-substitution shorthands can enumerate empty longhands in CSSOM.
+   * Read their authored shorthand values as well. */
+  const COLOR_SHORTHANDS = ["background", "border", "border-color", "border-top",
+    "border-right", "border-bottom", "border-left", "border-block", "border-inline",
+    "border-block-start", "border-block-end", "border-inline-start", "border-inline-end",
+    "outline", "text-decoration", "column-rule"];
+  const INHERITED_COLOR_PROP = /^(?:color|fill|stroke|caret-color|text-shadow)$/;
+  function colorReferences(style) {
+    const refs = new Set(), inheritedRefs = new Set(), pending = new Set();
+    const collect = (p, value) => {
+      for (const name of varRefs(value)) {
+        refs.add(name);
+        if (INHERITED_COLOR_PROP.test(p)) inheritedRefs.add(name);
+      }
+    };
+    for (const p of style) {
+      if (!COLOR_PROP.test(p)) continue;
+      const value = style.getPropertyValue(p);
+      if (value) collect(p, value);
+      else {
+        // Only inspect shorthands when CSSOM exposes an unresolved longhand.
+        const family = p.split("-")[0];
+        for (const shorthand of COLOR_SHORTHANDS) if (shorthand.startsWith(family)) pending.add(shorthand);
+      }
+    }
+    for (const p of pending) collect(p, style.getPropertyValue(p));
+    return { refs: [...refs], inheritedRefs: [...inheritedRefs] };
+  }
+  const colorRefs = (style, inheritedOnly = false) => colorReferences(style)[inheritedOnly ? "inheritedRefs" : "refs"];
+
   let customPropIndex = null;
   let indexWatermark = -1;
+  let variableDumpCache = null;
+  let variableDumpSeq = 0;
+
+  function expandNesting(selector, outer) {
+    let result = "", quote = "", nested = false;
+    for (let i = 0; i < selector.length; i++) {
+      const c = selector[i];
+      if (c === "\\") { result += c + (selector[++i] ?? ""); continue; }
+      if (quote) {
+        result += c;
+        if (c === quote) quote = "";
+      } else if (c === '"' || c === "'") {
+        quote = c; result += c;
+      } else if (selector.startsWith("/*", i)) {
+        const end = selector.indexOf("*/", i + 2);
+        if (end < 0) return selector;
+        result += selector.slice(i, end + 2); i = end + 1;
+      } else if (c === "&") {
+        result += outer; nested = true;
+      } else result += c;
+    }
+    return nested ? result : outer + " :is(" + result + ")";
+  }
+
+  function ruleSelector(rule) {
+    if (rule instanceof CSSNestedDeclarations) {
+      for (let parent = rule.parentRule; parent; parent = parent.parentRule) {
+        if (parent.selectorText) return ruleSelector(parent);
+      }
+      return "";
+    }
+    let sel = rule.selectorText;
+    for (let parent = rule.parentRule; parent; parent = parent.parentRule) {
+      if (!parent.selectorText) continue;
+      const outer = ":is(" + parent.selectorText + ")";
+      sel = expandNesting(sel, outer);
+    }
+    return sel;
+  }
+
+  function ruleActive(rule) {
+    for (let sheet = rule.parentStyleSheet; sheet; sheet = sheet.parentStyleSheet) {
+      if (sheet.disabled || (sheet.media.length && !matchMedia(sheet.media.mediaText).matches)) return false;
+      const imported = sheet.ownerRule;
+      if (imported instanceof CSSImportRule &&
+          ((imported.media.length && !matchMedia(imported.media.mediaText).matches) ||
+           (imported.supportsText && !CSS.supports(`(${imported.supportsText})`)))) return false;
+    }
+    for (let parent = rule.parentRule; parent; parent = parent.parentRule) {
+      if (parent instanceof CSSMediaRule && !matchMedia(parent.conditionText).matches) return false;
+      if (parent instanceof CSSSupportsRule && !CSS.supports(parent.conditionText)) return false;
+      // There is no CSSOM API to evaluate container conditions for an element.
+      // Keep computed-token discovery, without inventing a declaration owner.
+      if (parent instanceof CSSContainerRule || parent instanceof CSSStartingStyleRule) return false;
+    }
+    return true;
+  }
 
   function buildCustomPropIndex() {
     const index = [];
-    for (const sheet of document.styleSheets) {
+    for (const sheet of [...document.styleSheets, ...document.adoptedStyleSheets]) {
+      if (sheet === SHEET) continue; // our own live mappings are not site definitions
       try {
         walkRules(sheet.cssRules, (rule) => {
           const props = [];
           for (const p of rule.style) if (p.startsWith("--")) props.push(p);
-          if (props.length) index.push({ sel: rule.selectorText, props });
+          const { refs, inheritedRefs } = colorReferences(rule.style);
+          if (props.length || refs.length) index.push({ sel: ruleSelector(rule), props, refs,
+            inheritedRefs, rule });
         });
       } catch { /* cross-origin */ }
     }
@@ -377,33 +557,65 @@
 
   /* Invalidate when the document gains or loses a stylesheet (SPA chunks). */
   function propIndex() {
-    if (customPropIndex === null || indexWatermark !== document.styleSheets.length) {
+    const count = document.styleSheets.length + document.adoptedStyleSheets.filter((sheet) => sheet !== SHEET).length;
+    if (customPropIndex === null || indexWatermark !== count) {
       customPropIndex = buildCustomPropIndex();
-      indexWatermark = document.styleSheets.length;
+      indexWatermark = count;
     }
-    return customPropIndex;
+    return customPropIndex.filter((entry) => ruleActive(entry.rule));
   }
   const dropIndex = () => { customPropIndex = null; indexWatermark = -1; };
 
+  function ruleMatches(node, entry) {
+    try {
+      for (let parent = entry.rule.parentRule; parent; parent = parent.parentRule) {
+        if (!(parent instanceof CSSScopeRule)) continue;
+        const scope = parent.start ? node.closest(parent.start) : entry.rule.parentStyleSheet.ownerNode?.parentElement;
+        if (!scope) return false;
+        for (let n = node; n && n !== scope; n = n.parentElement) {
+          if (parent.end && n.matches(parent.end)) return false;
+        }
+        // Relative scoping selectors need scope-aware matching, not Element.matches().
+        if (entry.sel.includes(":scope") || entry.sel.includes("&")) return false;
+      }
+      return node.matches(entry.sel);
+    } catch { return false; }
+  }
+
+  function closestRule(node, entry) {
+    // A nearer selector match can be outside @scope's limit while a further
+    // ancestor still owns the inherited token. Keep searching after that miss.
+    for (let match = node?.closest(entry.sel); match;
+         match = match.parentElement?.closest(entry.sel)) {
+      if (ruleMatches(match, entry)) return match;
+    }
+    return null;
+  }
+
+  const componentSuffix = (col) => col.shape === "rgb-comma" ? "_rgb_comma"
+    : col.shape === "rgb-triplet" ? "_rgb" : col.shape === "hsl-triplet" ? "_hsl" : "";
+  function paletteValue(token, col) {
+    const value = `var(--${token}${componentSuffix(col)})`;
+    return !componentSuffix(col) && col.a < 1
+      ? `color-mix(in srgb, ${value} ${+(col.a * 100).toFixed(4)}%, transparent)` : value;
+  }
+
   /* Escape for use inside a quoted CSS attribute value. CSS.escape() is the
    * wrong tool here — it escapes identifiers, not string contents. */
-  const cssString = (v) => `"${String(v).replaceAll(/["\\]/g, "\\$&")}"`;
+  const cssString = (v) => `"${String(v).replaceAll(/["\\]/g, "\\$&")
+    .replaceAll(/[\n\r\f]/g, (c) => `\\${c.charCodeAt(0).toString(16)} `)}"`;
 
-  function detectRootScopes() {
-    const inner = new Set();
-    for (const el of [document.documentElement, document.body].filter(Boolean)) {
-      for (const cls of el.classList) {
-        if (/^(dark|dark-theme|theme-dark|dark-mode|night)$/i.test(cls)) inner.add(`.${CSS.escape(cls)}`);
-      }
-      for (const attr of el.getAttributeNames()) {
-        if (/^(data-theme|data-color-mode|data-bs-theme|theme|dark)$/i.test(attr)) {
-          const val = el.getAttribute(attr);
-          inner.add(val ? `[${attr}=${cssString(val)}]` : `[${attr}]`);
-        }
-      }
-    }
-    inner.add("[dark]").add(".dark").add('[data-theme="dark"]');
-    return `:root, :where(${[...inner].join(", ")})`;
+  function bodyTokenNames() {
+    const names = new Set();
+    const body = document.body;
+    if (!body) return names;
+    const collect = (style, props) => {
+      for (const name of props) if (name.startsWith("--") &&
+          !/^(?:inherit|unset)$/i.test(style.getPropertyValue(name).trim())) names.add(name);
+    };
+    collect(body.style, body.style);
+    for (const r of propIndex()) if (r.props.length && ruleMatches(body, r)) collect(r.rule.style, r.props);
+    return names;
   }
 
   function collectVariables() {
@@ -419,14 +631,14 @@
     }
     const out = new Map();
     for (const n of names) {
-      const v = (rootCs.getPropertyValue(n) || bodyCs.getPropertyValue(n)).trim();
-      if (v) out.set(n, v);
+      const rootValue = rootCs.getPropertyValue(n).trim();
+      const value = rootValue || bodyCs.getPropertyValue(n).trim();
+      if (value) out.set(n, { value, context: rootValue ? document.documentElement : document.body });
     }
     return out;
   }
 
-  /* Broad structural repaint, used ONLY when the page exposes fewer than three
-   * mappable tokens (the popup double-confirms before this is written). */
+  /* Broad structural repaint, used only when there are no mappable tokens. */
   function structuralFallback() {
     return [
       "/* Structural theme — this page exposes no usable design tokens. */",
@@ -435,8 +647,8 @@
       "    color: var(--on_surface) !important;",
       "    color-scheme: dark !important;",
       "}",
-      ":not(a):not(button):not(input):not(select):not(textarea):not(code):not(pre)",
-      ":not(table):not(svg):not(img):not(video):not([class*='icon']):not([class*='badge']):not([class*='btn']) {",
+      ":where(:not(a):not(button):not(input):not(select):not(textarea):not(code):not(pre)" +
+        ":not(table):not(svg):not(img):not(video):not([class*='icon']):not([class*='badge']):not([class*='btn'])) {",
       "    background-color: transparent !important;",
       "    color: inherit !important;",
       "}",
@@ -486,19 +698,26 @@
     dropIndex();
     const groups = new Map();
     const unmapped = [];
+    const variables = [];
     let found = 0;
 
-    for (const [name, rawValue] of collectVariables()) {
+    for (const [name, { value, context }] of collectVariables()) {
       if (skipVar(name) || !isSemanticThemeVar(name)) continue;
-      const col = parseCssColor(rawValue);
+      const col = parseCssColor(value, context);
       if (!col || col.a === 0) continue;
       found++;
       const token = matchKnownFramework(name) || classifyByValueAndName(name, col);
       if (!token || !TOKEN_NAMES.has(token)) { unmapped.push(name); continue; }
       if (`--${token}` === name) continue;
-      const key = col.shape === "rgb-triplet" ? `${token}\u0000rgb`
+      variables.push({ name, col, token, global: true });
+    }
+    verifyVariableInheritance(variables, () => "");
+    for (const { name, col, token, local } of variables) {
+      if (local) { unmapped.push(name); continue; }
+      const key = col.shape === "rgb-comma" ? `${token}\u0000rgb_comma`
+        : col.shape === "rgb-triplet" ? `${token}\u0000rgb`
         : col.shape === "hsl-triplet" ? `${token}\u0000hsl` : token;
-      (groups.get(key) ?? groups.set(key, []).get(key)).push(name);
+      (groups.get(key) ?? groups.set(key, []).get(key)).push({ name, col });
     }
 
     const body = [];
@@ -506,26 +725,35 @@
     let variableCount = 0;
     for (const list of groups.values()) variableCount += list.length;
 
-    /* Fewer than three mappable variables means the page is not variable
-     * driven; only then do we reach for the (very broad) structural theme. */
-    const kind = variableCount >= 3 ? "tokens" : "structural";
+    const kind = variableCount ? "tokens" : "structural";
 
     if (kind === "tokens") {
-      body.push(`${detectRootScopes()} {`, "    color-scheme: dark !important;");
+      body.push(":root {", "    color-scheme: dark !important;");
       for (const [token] of TOKENS) {
-        for (const suffix of ["", "\u0000rgb", "\u0000hsl"]) {
+        for (const suffix of ["", "\u0000rgb", "\u0000rgb_comma", "\u0000hsl"]) {
           const names = groups.get(token + suffix);
           if (!names) continue;
           const label = suffix === "\u0000rgb" ? `${token} (rgb components)`
             : suffix === "\u0000hsl" ? `${token} (hsl components)` : token;
           body.push(`    /* ${label} */`);
-          for (const n of names.toSorted()) {
-            body.push(`    ${n}: var(--${token}) !important;`);
+          for (const { name, col } of names.toSorted((a, b) => a.name.localeCompare(b.name))) {
+            body.push(`    ${CSS.escape(name)}: ${paletteValue(token, col)} !important;`);
             mapped++;
           }
         }
       }
       body.push("}");
+      // Inheritance cannot override a declaration on body. Override only its
+      // own tokens there; root tokens continue to resolve at the page root.
+      const bodyNames = bodyTokenNames();
+      const bodyCs = document.body && getComputedStyle(document.body);
+      const bodyMappings = [];
+      for (const { name, token, local } of variables) {
+        if (local || !bodyNames.has(name)) continue;
+        const col = parseCssColor(bodyCs.getPropertyValue(name), document.body);
+        if (col && col.a > 0) bodyMappings.push(`    ${CSS.escape(name)}: ${paletteValue(token, col)} !important;`);
+      }
+      if (bodyMappings.length) body.push("", "body {", ...bodyMappings, "}");
     } else {
       body.push(structuralFallback());
       mapped = variableCount || 1;
@@ -545,14 +773,875 @@
     };
   }
 
+  /* ══ VARIABLE DUMP (read-only export for manual theming) ═══════════════
+   * Unlike scan(), this does not try to map colours to the Matugen palette.
+   * It exports every custom property the page exposes, where it is defined,
+   * and how often it is referenced, so the whole token system can be
+   * inspected or handed to an editor/AI without copying a whole DOM dump. */
+  const DUMP_CHUNK = 512 * 1024;
+  const chunkAt = (text, offset) => {
+    let end = Math.min(offset + DUMP_CHUNK, text.length);
+    /* Never split a surrogate pair across two message payloads. */
+    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]) &&
+        /[\uDC00-\uDFFF]/.test(text[end])) end--;
+    return text.slice(offset, end);
+  };
+
+  function dumpVariables() {
+    dropIndex();
+    const definitions = new Map();  /* name → [{value, selector, condition, kind}] */
+    const seenDefinitions = new Set();
+    const usage = new Map();        /* name → var() reference count */
+    const addDefinition = (name, value, selector, condition = "", kind = "rule") => {
+      if (!name.startsWith("--")) return;
+      const text = String(value ?? "").trim();
+      if (!text) return;
+      const key = `${name}\u001f${text}\u001f${selector || ""}\u001f${condition}\u001f${kind}`;
+      if (seenDefinitions.has(key)) return;
+      seenDefinitions.add(key);
+      const list = definitions.get(name) ?? [];
+      list.push({ value: text, selector: selector || "", condition, kind });
+      definitions.set(name, list);
+    };
+    const conditionOf = (rule) => {
+      const parts = [];
+      for (let parent = rule.parentRule; parent; parent = parent.parentRule) {
+        if (parent instanceof CSSMediaRule && parent.conditionText) {
+          parts.unshift(`@media ${parent.conditionText}`);
+        } else if (parent instanceof CSSSupportsRule && parent.conditionText) {
+          parts.unshift(`@supports ${parent.conditionText}`);
+        } else if (parent instanceof CSSLayerBlockRule && parent.name) {
+          parts.unshift(`@layer ${parent.name}`);
+        } else if (parent instanceof CSSContainerRule && parent.conditionText) {
+          parts.unshift(`@container ${parent.conditionText}`);
+        }
+      }
+      return parts.join(" ");
+    };
+    const countRefs = (value) => {
+      for (const ref of varRefs(value)) usage.set(ref, (usage.get(ref) ?? 0) + 1);
+    };
+
+    /* Every open shadow root, including roots nested inside other shadows. */
+    const shadowRoots = [];
+    const addShadowRoot = (root) => {
+      if (!root || shadowRoots.includes(root)) return;
+      shadowRoots.push(root);
+      for (const el of root.querySelectorAll("*")) addShadowRoot(el.shadowRoot);
+    };
+    for (const el of document.querySelectorAll("*")) addShadowRoot(el.shadowRoot);
+
+    let sheets = 0;
+    let shadowSheets = 0;
+    const addSheets = (list, shadow = false) => {
+      for (const sheet of list) {
+        if (sheet === SHEET) continue;              /* the picker's own preview */
+        if (shadow) shadowSheets++;
+        else sheets++;
+        try {
+          walkRules(sheet.cssRules, (rule) => {
+            const rawSelector = ruleSelector(rule);
+            const selector = shadow ? `shadow ${rawSelector}` : rawSelector;
+            const condition = conditionOf(rule);
+            for (const name of rule.style) {
+              const value = rule.style.getPropertyValue(name);
+              if (name.startsWith("--")) addDefinition(name, value, selector, condition);
+              if (value) countRefs(value);
+            }
+          });
+        } catch { /* cross-origin or opaque sheet */ }
+      }
+    };
+    addSheets([...document.styleSheets, ...document.adoptedStyleSheets]);
+    for (const root of shadowRoots) {
+      addSheets([...root.styleSheets, ...(root.adoptedStyleSheets ?? [])], true);
+    }
+
+    /* Custom properties written directly on elements (often by scripts). */
+    const collectInline = (root, scope = "") => {
+      for (const el of root.querySelectorAll("[style]")) {
+        const selector = `inline <${el.localName}>${scope}`;
+        for (const name of el.style) {
+          const value = el.style.getPropertyValue(name);
+          if (name.startsWith("--")) addDefinition(name, value, selector, "", "inline");
+          if (value) countRefs(value);
+        }
+      }
+    };
+    collectInline(document);
+    for (const root of shadowRoots) collectInline(root, " (shadow DOM)");
+
+    /* Computed values also cover cross-origin sheets and script-set tokens. */
+    const computed = new Map();  /* name → {root?, body?, shadow?} */
+    const collectComputed = (el, key) => {
+      if (!el) return;
+      const cs = getComputedStyle(el);
+      for (const name of cs) {
+        if (!name.startsWith("--")) continue;
+        const value = cs.getPropertyValue(name).trim();
+        if (!value) continue;
+        const entry = computed.get(name) ?? {};
+        entry[key] = value;
+        computed.set(name, entry);
+      }
+    };
+    collectComputed(document.documentElement, "root");
+    collectComputed(document.body, "body");
+
+    for (const root of shadowRoots) {
+      for (const el of root.querySelectorAll("*")) {
+        const cs = getComputedStyle(el);
+        for (const name of cs) {
+          if (!name.startsWith("--")) continue;
+          const value = cs.getPropertyValue(name).trim();
+          if (!value) continue;
+          const entry = computed.get(name) ?? {};
+          entry.shadow ??= value;
+          computed.set(name, entry);
+        }
+      }
+    }
+    for (const values of computed.values()) {
+      for (const value of Object.values(values)) countRefs(value);
+    }
+
+    const names = [...new Set([...definitions.keys(), ...computed.keys()])]
+      .sort((a, b) => a.localeCompare(b));
+    const prefixOf = (name) => {
+      const cut = name.lastIndexOf("--");
+      if (cut > 2) return name.slice(0, cut + 2);
+      const parts = name.slice(2).split("-");
+      return `--${parts.slice(0, 2).join("-")}`;
+    };
+    const prefixCounts = new Map();
+    for (const name of names) {
+      const prefix = prefixOf(name);
+      prefixCounts.set(prefix, (prefixCounts.get(prefix) ?? 0) + 1);
+    }
+    const prefixes = [...prefixCounts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const code = (value) => "`" + String(value)
+      .replaceAll("`", "\\`").replaceAll("|", "\\|").replaceAll(/\r?\n/g, " ") + "`";
+
+    const lines = [
+      `# CSS custom properties — ${location.hostname || location.href}`,
+      "",
+      `- URL: ${location.href}`,
+      `- Exported: ${new Date().toISOString()}`,
+      `- Variables: ${names.length}`,
+      `- Accessible stylesheets: ${sheets}`,
+      `- Shadow-root stylesheets: ${shadowSheets}`,
+      `- Open shadow roots: ${shadowRoots.length}`,
+      "",
+      "Cross-origin stylesheets cannot be enumerated; their values are represented by computed values below.",
+      "",
+      "## Prefixes",
+      "",
+      "| Prefix | Variables |",
+      "| --- | ---: |",
+    ];
+    for (const [prefix, count] of prefixes) lines.push(`| ${code(prefix)} | ${count} |`);
+    lines.push(
+      "",
+      "## Computed values",
+      "",
+      "| Variable | Value | Scope | Uses |",
+      "| --- | --- | --- | ---: |",
+    );
+    for (const name of names) {
+      const c = computed.get(name);
+      const value = c?.root || c?.body || c?.shadow || definitions.get(name)?.[0]?.value || "";
+      const scope = c?.root ? ":root" : c?.body ? "body" : c?.shadow ? "shadow DOM" : "definition";
+      lines.push(`| ${code(name)} | ${value ? code(value) : ""} | ${scope} | ${usage.get(name) ?? 0} |`);
+    }
+
+    lines.push("", "## Definitions", "", "| Variable | Value | Selector | Condition |", "| --- | --- | --- | --- |");
+    let definitionCount = 0;
+    for (const name of names) {
+      for (const def of definitions.get(name) ?? []) {
+        definitionCount++;
+        lines.push(`| ${code(name)} | ${code(def.value)} | ${code(def.selector)} | ${code(def.condition)} |`);
+      }
+      for (const [key, label] of [["root", ":root"], ["body", "body"], ["shadow", "shadow DOM"]]) {
+        const value = computed.get(name)?.[key];
+        if (!value) continue;
+        lines.push(`| ${code(name)} | ${code(value)} | ${code(`${label} (computed)`)} | ${code("")} |`);
+      }
+    }
+    lines.push("", `- Definitions: ${definitionCount}`, "");
+
+    const text = lines.join("\n");
+    const id = `dump-${Date.now().toString(36)}-${++variableDumpSeq}`;
+    const filename = `${(location.hostname || "page").replace(/^www\./, "").replace(/[^\w.-]+/g, "_")}.variables.md`;
+    variableDumpCache = { id, text, total: text.length, filename };
+    const chunk = chunkAt(text, 0);
+    return {
+      ok: true,
+      id,
+      count: names.length,
+      definitions: definitionCount,
+      sheets,
+      shadowSheets,
+      shadowRoots: shadowRoots.length,
+      total: text.length,
+      chunk,
+      done: chunk.length >= text.length,
+      filename,
+    };
+  }
+
+  function dumpVariablesChunk(msg) {
+    const cache = variableDumpCache;
+    if (!cache || cache.id !== msg.id) {
+      return { ok: false, error: "The variable report expired — run Export variables again." };
+    }
+    const offset = Number.isInteger(msg.offset) ? msg.offset : -1;
+    if (offset < 0 || offset > cache.total) {
+      return { ok: false, error: `Invalid variable report offset: ${msg.offset}` };
+    }
+    const chunk = chunkAt(cache.text, offset);
+    return {
+      ok: true,
+      id: cache.id,
+      offset,
+      chunk,
+      total: cache.total,
+      done: offset + chunk.length >= cache.total,
+    };
+  }
+
+  /* ══ THEME AUDIT (authoring aid) ════════════════════════════════════
+   * Walks visible text and form controls, resolves their composited background
+   * (including gradient stops) and reports low-contrast or off-palette colours. */
+  const AUDIT_SKIP_TAGS = new Set([
+    "script", "style", "noscript", "template", "meta", "link", "title", "head",
+    "svg", "canvas", "video", "audio", "iframe", "object", "embed", "img",
+    "picture", "option", "datalist", "map", "area",
+  ]);
+  const AUDIT_NONTEXT_INPUTS = new Set([
+    "hidden", "checkbox", "radio", "range", "color", "file", "image",
+  ]);
+  const AUDIT_BG_SURFACE_TOKENS = new Set([
+    "surface", "surface_dim", "surface_bright", "surface_variant",
+    "surface_container_lowest", "surface_container_low", "surface_container",
+    "surface_container_high", "surface_container_highest", "background",
+    "inverse_on_surface", "primary_container", "secondary_container",
+    "tertiary_container", "error_container", "scrim", "shadow",
+  ]);
+  const AUDIT_BG_ACCENT_TOKENS = new Set([
+    "primary", "primary_fixed", "primary_fixed_dim",
+    "secondary", "secondary_fixed", "secondary_fixed_dim",
+    "tertiary", "tertiary_fixed", "tertiary_fixed_dim",
+    "error", "inverse_primary", "surface_tint", "source_color",
+  ]);
+  const AUDIT_FG_ON_DARK_TOKENS = new Set([
+    "on_surface", "on_surface_variant", "on_background",
+    "primary", "primary_fixed", "primary_fixed_dim",
+    "secondary", "secondary_fixed", "secondary_fixed_dim",
+    "tertiary", "tertiary_fixed", "tertiary_fixed_dim",
+    "error", "on_primary_container", "on_secondary_container",
+    "on_tertiary_container", "on_error_container", "outline",
+  ]);
+  const AUDIT_FG_ON_LIGHT_TOKENS = new Set([
+    "on_primary", "on_primary_fixed", "on_primary_fixed_variant",
+    "on_secondary", "on_secondary_fixed", "on_secondary_fixed_variant",
+    "on_tertiary", "on_tertiary_fixed", "on_tertiary_fixed_variant",
+    "on_error", "inverse_on_surface", "inverse_primary",
+    "surface", "background", "surface_container_lowest",
+  ]);
+  const AUDIT_SECONDARY_TOKENS = new Set([
+    "background", "surface_dim", "surface_tint", "source_color", "scrim", "shadow",
+    "primary_fixed", "primary_fixed_dim", "on_primary_fixed", "on_primary_fixed_variant",
+    "secondary_fixed", "secondary_fixed_dim", "on_secondary_fixed", "on_secondary_fixed_variant",
+    "tertiary_fixed", "tertiary_fixed_dim", "on_tertiary_fixed", "on_tertiary_fixed_variant",
+  ]);
+  const AUDIT_DELTA_MAX = 14;
+  const AUDIT_ACCENT_BG_DELTA_MAX = 8;
+  const AUDIT_INVERSE_BG_DELTA_MAX = 3.5;
+  const AUDIT_MAX_ELEMENTS = 6000;
+  const AUDIT_MAX_FINDINGS = 100;
+  const AUDIT_SHEET = new CSSStyleSheet();
+  let auditTimer = 0;
+
+  function clearAudit() {
+    clearTimeout(auditTimer);
+    auditTimer = 0;
+    document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== AUDIT_SHEET);
+  }
+
+  function showAudit(selectors) {
+    clearAudit();
+    if (!selectors.length) return;
+    try {
+      AUDIT_SHEET.replaceSync(selectors.slice(0, 500)
+        .map((sel) => `${sel}{outline:2px solid var(--primary, #ffb59d) !important;outline-offset:1px !important;}`)
+        .join("\n"));
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, AUDIT_SHEET];
+      auditTimer = setTimeout(clearAudit, 60_000);
+    } catch { /* an exotic selector must not break the audit */ }
+  }
+
+  const rgbHex = ({ r, g, b }) => "#" + [r, g, b]
+    .map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0"))
+    .join("");
+
+  const contrastRatio = (a, b) => {
+    const la = luminance(a.r, a.g, a.b), lb = luminance(b.r, b.g, b.b);
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+  };
+
+  const blendOver = (fg, bg) => ({
+    r: fg.r * fg.a + bg.r * (1 - fg.a),
+    g: fg.g * fg.a + bg.g * (1 - fg.a),
+    b: fg.b * fg.a + bg.b * (1 - fg.a),
+    a: 1,
+  });
+
+  function toLab({ r, g, b }) {
+    const R = srgb(r), G = srgb(g), B = srgb(b);
+    const x = (0.4124 * R + 0.3576 * G + 0.1805 * B) / 0.95047;
+    const y = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+    const z = (0.0193 * R + 0.1192 * G + 0.9505 * B) / 1.08883;
+    const f = (t) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+    const fx = f(x), fy = f(y), fz = f(z);
+    return { L: 116 * fy - 16, a: 500 * (fx - fy), b: 200 * (fy - fz) };
+  }
+
+  const deltaE = (a, b) => Math.hypot(a.L - b.L, a.a - b.a, a.b - b.b);
+
+  function nearestToken(lab, list) {
+    let best = null;
+    for (const p of list) {
+      const d = deltaE(lab, p.lab);
+      if (!best || d < best.delta - 0.5 ||
+          (Math.abs(d - best.delta) <= 0.5 && p.rank < best.rank)) {
+        best = { token: p.token, delta: d, rank: p.rank };
+      }
+    }
+    return best;
+  }
+
+  function auditPalette(given) {
+    const out = [];
+    const rootCs = getComputedStyle(document.documentElement);
+    for (const token of PALETTE_OWNED) {
+      const raw = (given && given[`--${token}`]) || rootCs.getPropertyValue(`--${token}`).trim();
+      if (!raw) continue;
+      const col = parseCssColor(String(raw).trim(), document.documentElement);
+      if (col && col.a > 0.5) {
+        out.push({
+          token, col, lab: toLab(col),
+          rank: AUDIT_SECONDARY_TOKENS.has(token) ? 2 : (token.includes("_container") ? 1 : 0),
+          isBgSurface: AUDIT_BG_SURFACE_TOKENS.has(token),
+          isBgAccent: AUDIT_BG_ACCENT_TOKENS.has(token),
+          isFgDark: AUDIT_FG_ON_DARK_TOKENS.has(token),
+          isFgLight: AUDIT_FG_ON_LIGHT_TOKENS.has(token),
+        });
+      }
+    }
+    return out;
+  }
+
+  const COLOR_STOP_RE = /#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})\b|(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix)\((?:[^()]|\([^()]*\))+\)|\btransparent\b/gi;
+
+  function parseGradientStops(bgImage, el) {
+    const matches = bgImage.match(COLOR_STOP_RE);
+    if (!matches?.length) return null;
+    const stops = [];
+    for (const raw of matches) {
+      if (/^transparent$/i.test(raw)) {
+        stops.push({ r: 0, g: 0, b: 0, a: 0 });
+        continue;
+      }
+      const c = parseCssColor(raw, el);
+      if (c) stops.push(c);
+    }
+    return stops.length ? stops : null;
+  }
+
+  function defaultCanvasColor() {
+    const rootCs = getComputedStyle(document.documentElement);
+    const bodyCs = document.body ? getComputedStyle(document.body) : rootCs;
+    const scheme = `${rootCs.colorScheme} ${bodyCs.colorScheme}`;
+    if (/\bdark\b/i.test(scheme)) {
+      const surface = parseCssColor(rootCs.getPropertyValue("--surface").trim(), document.documentElement);
+      return surface && surface.a >= 1 ? surface : { r: 26, g: 17, b: 15, a: 1 };
+    }
+    return { r: 255, g: 255, b: 255, a: 1 };
+  }
+
+  /* Author stylesheets cannot override an inline !important background unless
+   * it references a CSS variable. Skip off-palette-background for such owners. */
+  function isInlineLockedBg(el) {
+    const st = el?.style;
+    if (!st) return false;
+    if (st.getPropertyPriority("background-color") === "important") {
+      const raw = st.getPropertyValue("background-color");
+      if (raw && !varRefs(raw).length) {
+        const col = parseCssColor(raw, el);
+        if (col && col.a >= 0.999) return true;
+      }
+    }
+    if (st.getPropertyPriority("background-image") === "important") {
+      const raw = st.getPropertyValue("background-image");
+      if (raw && /gradient\(/i.test(raw) && !varRefs(raw).length) {
+        const stops = parseGradientStops(raw, el);
+        if (stops?.length && stops.every((s) => s.a >= 0.999)) return true;
+      }
+    }
+    return false;
+  }
+
+  function auditBackground(el, fallbackCanvas, skipSelfBg = false) {
+    const allNodes = [];
+    let imageOwner = null, bgOwner = null, opaqueAt = -1;
+    for (let n = el; n && n.nodeType === 1;
+         n = n.parentElement || n.getRootNode?.()?.host || null) {
+      const cs = getComputedStyle(n);
+      const op = Number(cs.opacity);
+      const opacity = Number.isFinite(op) ? Math.max(0, Math.min(1, op)) : 1;
+      if (skipSelfBg && n === el) {
+        if (opacity < 0.999) allNodes.push({ stops: null, opacity });
+        continue;
+      }
+      if (opaqueAt >= 0) {
+        if (opacity < 0.999) opaqueAt = -1;
+        else continue;
+      }
+      const bgi = cs.backgroundImage;
+      const col = parseCssColor(cs.backgroundColor, n);
+      let stops = null;
+      if (bgi && bgi !== "none") {
+        if (/url\(/i.test(bgi) && (!col || col.a < 0.999)) imageOwner ??= n;
+        if (/gradient\(/i.test(bgi)) stops = parseGradientStops(bgi, n);
+      }
+      if (stops) {
+        bgOwner ??= n;
+        const opaqueStops = stops.every((s) => s.a >= 0.999);
+        if (col && col.a > 0 && !opaqueStops) {
+          stops = stops.map((s) => (s.a >= 1 ? s : {
+            ...blendOver(s, col),
+            a: s.a + col.a * (1 - s.a),
+          }));
+        }
+        allNodes.push({ stops, opacity });
+        if ((opaqueStops || (col && col.a >= 0.999)) && opacity >= 0.999) opaqueAt = allNodes.length;
+        continue;
+      }
+      if (col && col.a > 0) {
+        bgOwner ??= n;
+        allNodes.push({ stops: [col], opacity });
+        if (col.a >= 0.999 && opacity >= 0.999) opaqueAt = allNodes.length;
+      } else if (opacity < 0.999) {
+        allNodes.push({ stops: null, opacity });
+      }
+    }
+    const layers = opaqueAt >= 0 ? allNodes.slice(0, opaqueAt) : allNodes;
+    let states = [{
+      rawBg: fallbackCanvas,
+      fgScale: 1,
+      fgOffset: { r: 0, g: 0, b: 0 },
+    }];
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const { stops, opacity } = layers[i];
+      const next = [];
+      for (const st of states) {
+        const fgScale = st.fgScale * opacity;
+        const fgOffset = {
+          r: st.fgScale * (1 - opacity) * st.rawBg.r + st.fgOffset.r,
+          g: st.fgScale * (1 - opacity) * st.rawBg.g + st.fgOffset.g,
+          b: st.fgScale * (1 - opacity) * st.rawBg.b + st.fgOffset.b,
+        };
+        if (!stops) {
+          next.push({ rawBg: st.rawBg, fgScale, fgOffset });
+          continue;
+        }
+        for (const s of stops) {
+          const rawBg = s.a >= 1 ? { r: s.r, g: s.g, b: s.b, a: 1 } : blendOver(s, st.rawBg);
+          next.push({ rawBg, fgScale, fgOffset });
+        }
+      }
+      states = next.slice(0, 8);
+    }
+    const bgs = states.map((st) => ({
+      rawBg: st.rawBg,
+      screenBg: {
+        r: st.fgScale * st.rawBg.r + st.fgOffset.r,
+        g: st.fgScale * st.rawBg.g + st.fgOffset.g,
+        b: st.fgScale * st.rawBg.b + st.fgOffset.b,
+        a: 1,
+      },
+      fgScale: st.fgScale,
+      fgOffset: st.fgOffset,
+    }));
+    return {
+      bgs,
+      imageOwner,
+      bgOwner: bgOwner || document.body || document.documentElement,
+    };
+  }
+
+  function auditTextOf(el) {
+    const tag = el.localName;
+    if (tag === "input") {
+      const type = (el.getAttribute("type") || "text").toLowerCase();
+      if (AUDIT_NONTEXT_INPUTS.has(type)) return "";
+      const val = String(el.value || "").replace(/\s+/g, " ").trim();
+      if (val) return val;
+      return String(el.placeholder || "").replace(/\s+/g, " ").trim();
+    }
+    if (tag === "textarea") {
+      const val = String(el.value || "").replace(/\s+/g, " ").trim();
+      if (val) return val;
+      return String(el.placeholder || "").replace(/\s+/g, " ").trim();
+    }
+    if (tag === "select") return String(el.selectedOptions?.[0]?.textContent || "").replace(/\s+/g, " ").trim();
+    let text = "";
+    for (const n of el.childNodes) if (n.nodeType === 3) text += n.textContent;
+    text = text.replace(/\s+/g, " ").trim();
+    if (text || el.childElementCount > 0) return text;
+    for (const pseudo of ["::before", "::after"]) {
+      const content = getComputedStyle(el, pseudo).content;
+      if (content && content !== "none" && content !== "normal" && /^["']/.test(content)) {
+        const cleaned = content.slice(1, -1).replace(/\s+/g, " ").trim();
+        if (cleaned) return cleaned;
+      }
+    }
+    return "";
+  }
+
+  /* Screen-reader-only (.sr-only) elements remain display:block and 1×1px so
+   * checkVisibility() and getClientRects() pass. Skip only clipped/1×1 nodes. */
+  function isVisuallyHidden(cs, rects) {
+    if (!rects.length) return true;
+    if ((parseFloat(cs.fontSize) || 0) < 1) return true;
+    const r = rects[0];
+    if (r.width <= 2 && r.height <= 2 &&
+        (cs.overflowX === "hidden" || cs.overflowX === "clip") &&
+        (cs.overflowY === "hidden" || cs.overflowY === "clip")) {
+      return true;
+    }
+    const cp = cs.clipPath;
+    if (cp && cp !== "none" &&
+        /^(?:inset\(\s*(?:[5-9]\d|\d{3,})%|circle\(\s*0(?:px|%)?\b)/i.test(cp)) {
+      return true;
+    }
+    const clip = cs.clip;
+    if (clip && clip !== "auto" &&
+        /^rect\(\s*(?:0|1)px,\s*(?:0|1)px,\s*(?:0|1)px,\s*(?:0|1)px\s*\)$/i.test(clip)) {
+      return true;
+    }
+    return false;
+  }
+
+  /* Prefer a unique ID or bounded class selector so equal offenders highlight together. */
+  function auditSelector(el) {
+    let targetEl = el;
+    while (targetEl?.getRootNode?.() instanceof ShadowRoot) {
+      targetEl = targetEl.getRootNode().host;
+    }
+    if (!targetEl || targetEl.nodeType !== 1) return "";
+    const list = candidates(targetEl);
+    return list.find((c) => c.sel.startsWith("#") && !c.sel.includes(" ") && c.n === 1)?.sel
+      ?? list.find((c) => c.sel.includes(".") && c.n <= 80)?.sel
+      ?? list[0]?.sel ?? nthPath(targetEl);
+  }
+
+  function audit(msg) {
+    clearAudit();
+    const palette = auditPalette(msg?.palette);
+    const bgSurfacePalette = palette.filter((p) => p.isBgSurface);
+    const bgAccentPalette = palette.filter((p) => p.isBgAccent);
+    const bgAllValid = [...bgSurfacePalette, ...bgAccentPalette];
+    const fgDarkPalette = palette.filter((p) => p.isFgDark);
+    const fgLightPalette = palette.filter((p) => p.isFgLight);
+    const inverseSurface = palette.find((p) => p.token === "inverse_surface") ?? null;
+    const root = document.body || document.documentElement;
+    if (!root) return { ok: false, error: "The page has no body to audit." };
+
+    const fallbackCanvas = defaultCanvasColor();
+    const seen = new Map();
+    const surfaceState = new WeakMap();
+    const skippedImages = new WeakSet();
+    const roots = [root];
+    let scanned = 0, textCount = 0, imageSkipped = 0, lockedBgSkipped = 0, shadowRoots = 0;
+
+    const filter = {
+      acceptNode(node) {
+        if (node === hostEl || node.localName === "dusky-picker") return NodeFilter.FILTER_REJECT;
+        if (AUDIT_SKIP_TAGS.has(node.localName)) return NodeFilter.FILTER_REJECT;
+        if (node.matches?.(':disabled, [disabled], [aria-disabled="true"]')) return NodeFilter.FILTER_REJECT;
+        if (!node.checkVisibility({ checkOpacity: true })) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    };
+
+    const classifyBgStop = (col) => {
+      const lab = toLab(col);
+      const surfMatch = nearestToken(lab, bgSurfacePalette);
+      if (surfMatch && surfMatch.delta <= AUDIT_DELTA_MAX) {
+        return { off: false, match: surfMatch, lab };
+      }
+      const accMatch = nearestToken(lab, bgAccentPalette);
+      if (accMatch && accMatch.delta <= AUDIT_ACCENT_BG_DELTA_MAX) {
+        return { off: false, match: accMatch, lab };
+      }
+      if (inverseSurface && deltaE(lab, inverseSurface.lab) <= AUDIT_INVERSE_BG_DELTA_MAX) {
+        return {
+          off: false,
+          match: { token: "inverse_surface", delta: deltaE(lab, inverseSurface.lab), rank: 1 },
+          lab,
+        };
+      }
+      const fallbackMatch = nearestToken(lab, bgSurfacePalette.length ? bgSurfacePalette : palette);
+      return { off: true, match: fallbackMatch, lab };
+    };
+
+    for (let rIdx = 0; rIdx < roots.length && scanned < AUDIT_MAX_ELEMENTS; rIdx++) {
+      const walker = document.createTreeWalker(roots[rIdx], NodeFilter.SHOW_ELEMENT, filter);
+      for (let el = walker.nextNode();
+           el && scanned < AUDIT_MAX_ELEMENTS;
+           el = walker.nextNode()) {
+        scanned++;
+        if (el.shadowRoot && !roots.includes(el.shadowRoot)) {
+          roots.push(el.shadowRoot);
+          shadowRoots++;
+        }
+
+        const text = auditTextOf(el);
+        if (!text) continue;
+
+        const cs = getComputedStyle(el);
+        if (cs.visibility !== "visible") continue;
+        const rects = el.getClientRects();
+        if (isVisuallyHidden(cs, rects)) continue;
+
+        const isPlaceholder = (el.localName === "input" || el.localName === "textarea") &&
+          !String(el.value || "").trim() && !!el.placeholder;
+        let fgStops = null;
+        let skipSelfBg = false;
+
+        if (isPlaceholder) {
+          const pcs = getComputedStyle(el, "::placeholder");
+          const pCol = parseCssColor(pcs.color, el);
+          const pOp = Number(pcs.opacity);
+          if (pCol) {
+            fgStops = [{
+              ...pCol,
+              a: pCol.a * (Number.isFinite(pOp) ? Math.max(0, Math.min(1, pOp)) : 1),
+            }];
+          }
+        } else {
+          const fillRaw = cs.webkitTextFillColor;
+          const fillCol = fillRaw ? parseCssColor(fillRaw, el) : null;
+          const rawFg = (fillCol && fillCol.a > 0) ? fillCol : parseCssColor(cs.color, el);
+          const bgClip = cs.backgroundClip || cs.webkitBackgroundClip || "";
+          if ((!rawFg || rawFg.a < 0.05) && bgClip === "text") {
+            const clipStops = cs.backgroundImage && cs.backgroundImage !== "none"
+              ? parseGradientStops(cs.backgroundImage, el)
+              : null;
+            const clipBg = parseCssColor(cs.backgroundColor, el);
+            fgStops = clipStops || (clipBg && clipBg.a >= 0.05 ? [clipBg] : null);
+            skipSelfBg = true;
+          } else if (rawFg) {
+            fgStops = [rawFg];
+          }
+        }
+
+        if (!fgStops || !fgStops.some((s) => s.a >= 0.05)) continue;
+        textCount++;
+
+        const { bgs, imageOwner, bgOwner } = auditBackground(el, fallbackCanvas, skipSelfBg);
+        let bg = bgs[0].screenBg, rawBg = bgs[0].rawBg;
+        let rawInk = fgStops[0], ink = fgStops[0], ratio = Infinity;
+
+        for (const st of bgs) {
+          for (const fStop of fgStops) {
+            if (fStop.a < 0.05) continue;
+            const candRawInk = fStop.a >= 1 ? fStop : blendOver(fStop, st.rawBg);
+            const candScreenInk = {
+              r: st.fgScale * candRawInk.r + st.fgOffset.r,
+              g: st.fgScale * candRawInk.g + st.fgOffset.g,
+              b: st.fgScale * candRawInk.b + st.fgOffset.b,
+              a: 1,
+            };
+            const candRatio = contrastRatio(candScreenInk, st.screenBg);
+            if (candRatio < ratio) {
+              ratio = candRatio;
+              bg = st.screenBg;
+              rawBg = st.rawBg;
+              rawInk = candRawInk;
+              ink = candScreenInk;
+            }
+          }
+        }
+
+        const size = parseFloat(cs.fontSize) || 16;
+        const weight = cs.fontWeight === "bold" ? 700 : (parseInt(cs.fontWeight, 10) || 400);
+        const large = size >= 24 || (size >= 18.66 && weight >= 700);
+        const need = large ? 3 : 4.5;
+        const reasons = [];
+
+        if (imageOwner) {
+          if (!skippedImages.has(imageOwner)) {
+            skippedImages.add(imageOwner);
+            imageSkipped++;
+          }
+        } else if (ratio < need) {
+          reasons.push("low-contrast");
+        }
+
+        let surfInfo = bgOwner ? surfaceState.get(bgOwner) : null;
+        if (!surfInfo && !imageOwner && bgAllValid.length && bgOwner) {
+          let worstStop = null;
+          for (const st of bgs) {
+            const res = classifyBgStop(st.rawBg);
+            if (!worstStop || (res.off && !worstStop.off) ||
+                (res.off === worstStop.off && (res.match?.delta ?? 0) > (worstStop.match?.delta ?? 0))) {
+              worstStop = res;
+            }
+          }
+          const off = !!worstStop?.off;
+          const locked = off && isInlineLockedBg(bgOwner);
+          if (locked) lockedBgSkipped++;
+          surfInfo = {
+            off,
+            locked,
+            bgNearest: worstStop?.match ?? null,
+            reported: false,
+          };
+          surfaceState.set(bgOwner, surfInfo);
+        }
+
+        let bgNearest = surfInfo?.bgNearest ?? null;
+        if (surfInfo?.off && !surfInfo.locked && !surfInfo.reported) {
+          surfInfo.reported = true;
+          reasons.push("off-palette-background");
+        }
+
+        const bgLab = toLab(rawBg);
+        const activeFgPool = bgLab.L > 45
+          ? (fgLightPalette.length ? fgLightPalette : palette)
+          : (fgDarkPalette.length ? fgDarkPalette : palette);
+        const fgLab = toLab(rawInk);
+        const nearest = nearestToken(fgLab, activeFgPool);
+        if (!imageOwner && !surfInfo?.off && nearest && nearest.delta > AUDIT_DELTA_MAX) {
+          reasons.push("off-palette-text");
+        }
+
+        if (!reasons.length) continue;
+
+        const sig = `${el.localName}.${[...el.classList].sort().join(".")}` +
+          `|${rgbHex(ink)}|${rgbHex(bg)}|${reasons.join(",")}`;
+        const selector = auditSelector(el);
+        const ownerSel = (reasons.includes("off-palette-background") && bgOwner && bgOwner !== el)
+          ? auditSelector(bgOwner) : "";
+        const hit = seen.get(sig);
+        if (hit) {
+          hit.count++;
+          if (selector && hit.selectors.size < 5) hit.selectors.add(selector);
+          if (ownerSel && hit.selectors.size < 5) hit.selectors.add(ownerSel);
+          continue;
+        }
+        if (!selector) continue;
+        const selectors = new Set([selector]);
+        if (ownerSel) selectors.add(ownerSel);
+        seen.set(sig, {
+          selector,
+          selectors,
+          text: text.slice(0, 140),
+          count: 1,
+          reasons,
+          fg: rgbHex(ink),
+          bg: rgbHex(bg),
+          ratio: Math.round(ratio * 100) / 100,
+          need,
+          nearest: nearest?.token ?? "",
+          delta: Math.round(nearest?.delta ?? 0),
+          bgToken: bgNearest?.token ?? "",
+          bgDelta: Math.round(bgNearest?.delta ?? 0),
+          html: el.outerHTML.replace(/\s+/g, " ").slice(0, 360),
+        });
+      }
+    }
+
+    dropProbe();
+    const allIssues = [...seen.values()].sort((a, b) => {
+      const rank = (x) => (x.reasons.includes("low-contrast") ? 0 : 1);
+      return rank(a) - rank(b) || b.count - a.count || a.ratio - b.ratio;
+    });
+    let shown;
+    if (allIssues.length <= AUDIT_MAX_FINDINGS) {
+      shown = allIssues;
+    } else {
+      const lowList = allIssues.filter((i) => i.reasons.includes("low-contrast"));
+      const offList = allIssues.filter((i) => !i.reasons.includes("low-contrast"));
+      const lowQuota = Math.min(lowList.length, Math.max(75, AUDIT_MAX_FINDINGS - offList.length));
+      const offQuota = Math.min(offList.length, AUDIT_MAX_FINDINGS - lowQuota);
+      shown = [...lowList.slice(0, lowQuota), ...offList.slice(0, offQuota)];
+    }
+    showAudit([...new Set(shown.flatMap((i) => [...i.selectors]))]);
+
+    const low = allIssues.filter((i) => i.reasons.includes("low-contrast")).length;
+    const off = allIssues.filter((i) => i.reasons.some((r) => r.startsWith("off-palette"))).length;
+    const capHit = scanned >= AUDIT_MAX_ELEMENTS;
+    const host = (location.hostname || "page").replace(/^www\./, "");
+    const lines = [
+      `# Dusky theme audit — ${host}`,
+      "",
+      `- URL: ${location.href}`,
+      `- Palette: ${palette.length} token(s) loaded` +
+        (palette.length ? "" : " — palette variables were not found on this page"),
+      `- Scanned: ${scanned}${capHit ? ` (cap ${AUDIT_MAX_ELEMENTS} reached)` : ""} elements` +
+        (shadowRoots ? ` across ${shadowRoots} shadow root(s)` : "") +
+        `, ${textCount} with visible text` +
+        (imageSkipped ? `, ${imageSkipped} url-image background(s) skipped` : "") +
+        (lockedBgSkipped ? `, ${lockedBgSkipped} inline-!important background(s) skipped` : ""),
+      `- Findings: ${allIssues.length} (${low} low contrast, ${off} off-palette)` +
+        (allIssues.length > shown.length ? ` — showing the first ${shown.length}` : ""),
+      "",
+    ];
+
+    if (!shown.length) {
+      lines.push("No problems found. 🎉", "");
+    } else {
+      shown.forEach((it, i) => {
+        lines.push(
+          `## ${i + 1}. \`${it.selector}\`${it.count > 1 ? ` ×${it.count}` : ""}`,
+          `- ${it.reasons.join(", ")}`,
+          `- contrast ${it.ratio}:1 (needs ${it.need}:1) · fg ${it.fg} · bg ${it.bg}`,
+          `- nearest text token: ${it.nearest || "none"} (ΔE ${it.delta})` +
+            (it.bgToken ? ` · nearest bg token: ${it.bgToken} (ΔE ${it.bgDelta})` : ""),
+          `- text: “${it.text}”`,
+          "```html",
+          it.html,
+          "```",
+          "",
+        );
+      });
+    }
+
+    return {
+      ok: true,
+      scanned,
+      textCount,
+      imageSkipped,
+      lockedBgSkipped,
+      issues: allIssues.length,
+      lowContrast: low,
+      offPalette: off,
+      truncated: allIssues.length > shown.length || capHit,
+      text: lines.join("\n"),
+    };
+  }
+
   /* ══ VISUAL PICKER ══════════════════════════════════════════════════ */
   const LIMITS = { RULES: 600, DECL: 4096, SEL: 512, BODY: 512 * 1024 };
 
   const S = {
-    active: false, hydrated: false, note: "", rev: 0, warnings: [],
+    active: false, hydrated: false, note: "", paletteNote: "", rev: 0, warnings: [],
     rules: Object.freeze([]), undo: [], redo: [], stack: [], depth: 0,
-    locked: false, targetMode: "selector", group: "bg",
-    elementVars: [], panelPos: null, raf: 0, editKey: null, generation: 0,
+    locked: false, targetMode: "variable", pickStep: "target", group: "bg",
+    elementVars: [], selectors: [], raf: 0, editKey: null, generation: 0,
   };
 
   const US = "\u001F";
@@ -566,13 +1655,14 @@
   const enc = (s) => encodeURIComponent(String(s))
     .replaceAll(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
   const dec = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
-  const KEY_RE = /\/\*\s*dusky\s+key=([^\s*|]+)\s*(?:\|\s*([^*]*?)\s*)?\*\/\s*$/;
+  const KEY_RE = /\/\*\s*dusky\s+key=([^\s*|]+)\s*(?:\|\s*(.*?)\s*)?\*\/\s*$/;
 
   const oneLine = (s) => String(s ?? "").replaceAll(/\s*[\r\n]+\s*/g, " ").trim();
   const safeMeta = (s) => oneLine(s).replaceAll("*/", "* /").slice(0, 160);
 
   const selKey = (sel, group) => `sel${US}${sel}${US}${group}`;
-  const varKey = (scope, name) => `var${US}${scope}${US}${name}`;
+  // Earlier picker versions wrote the same root target with repeated specificity.
+  const varKey = (scope, name) => `var${US}${scope === ROOT_ARMOR ? ":root" : scope}${US}${name}`;
   const rawKey = (css) => `raw${US}${css}`;
 
   /* One parser for every key shape — no more positional indexing. */
@@ -584,8 +1674,11 @@
     return { kind: "invalid" };
   }
 
-  const propsOf = (decl) => [...new Set(String(decl).split(";")
-    .map((d) => d.split(":")[0].trim().toLowerCase()).filter(Boolean))].toSorted();
+  const declStyle = document.createElement("div").style;
+  const propsOf = (decl) => {
+    declStyle.cssText = decl;
+    return [...declStyle].toSorted();
+  };
 
   const PROP_GROUP = [
     [/^background(-color|-image)?$/, "bg"], [/^color$/, "text"],
@@ -593,26 +1686,50 @@
   ];
   function groupOfDecl(decl) {
     const props = propsOf(decl);
-    const first = props[0] ?? "";
-    if (first.startsWith("--")) return "var";
-    for (const [re, g] of PROP_GROUP) if (re.test(first)) return g;
+    if (props.length === 1 && props[0].startsWith("--")) return "var";
+    if (props.some((p) => !COLOR_PROP.test(p) && p !== "display")) return `custom:${props.join(",")}`;
+    if (props.includes("fill")) return "fill";
+    for (const [re, g] of PROP_GROUP) if (props.some((p) => re.test(p))) return g;
     return `custom:${props.join(",")}`;
   }
-  const tokenOf = (decl) => /var\(\s*--([a-z0-9_]+)/i.exec(String(decl ?? ""))?.[1] ?? "";
+  const tokenOf = (decl) => varRefs(String(decl ?? "")).find((name) =>
+    PALETTE_OWNED.has(name.slice(2).replace(PALETTE_SUFFIX, "")))?.slice(2) ?? "";
+  function remapPalette(decl, token) {
+    let result = String(decl ?? "");
+    for (const { name, start, end } of variableReferences(result).reverse()) {
+      if (!PALETTE_OWNED.has(name.slice(2).replace(PALETTE_SUFFIX, ""))) continue;
+      result = result.slice(0, start) + `--${token}${name.match(/_(?:rgb_comma|rgb|hsl)$/)?.[0] ?? ""}` + result.slice(end);
+    }
+    return result;
+  }
+  function remapVariable(name, decl, token) {
+    if (tokenOf(decl)) return remapPalette(decl, token);
+    declStyle.cssText = decl;
+    const col = parseCssColor(declStyle.getPropertyValue(name));
+    return `${CSS.escape(name)}: ${paletteValue(token, col ?? { shape: "color", a: 1 })} !important;`;
+  }
 
   function splitRule(text) {
     let depth = 0, inStr = 0, selEnd = -1, bodyStart = -1, bodyEnd = -1;
     for (let i = 0; i < text.length; i++) {
       const c = text[i];
       if (inStr) { if (c === "\\") i++; else if (c === inStr) inStr = 0; continue; }
+      if (c === "\\") { i++; continue; }
+      if (text.startsWith("/*", i)) {
+        const end = text.indexOf("*/", i + 2);
+        if (end < 0) return null;
+        i = end + 1;
+        continue;
+      }
       if (c === '"' || c === "'") { inStr = c; continue; }
       if (c === "{") { if (depth++ === 0) { selEnd = i; bodyStart = i + 1; } continue; }
       if (c === "}") { if (--depth === 0) { bodyEnd = i; break; } }
     }
-    if (selEnd < 0 || bodyEnd < 0) return null;
+    if (selEnd < 0 || bodyEnd < 0 || text.slice(bodyEnd + 1).trim()) return null;
     return { sel: text.slice(0, selEnd).trim(), decl: text.slice(bodyStart, bodyEnd).trim() };
   }
 
+  let ruleProbe = null;
   function parseRule(line) {
     const trimmed = line.trim();
     if (!trimmed) return null;
@@ -622,9 +1739,18 @@
     const css = km ? trimmed.slice(0, km.index).trim() : trimmed;
     if (!css) return null;
 
-    const parts = splitRule(css);
-    if (!parts?.sel || !parts?.decl) {
+    const parts = css.includes("\n") ? null : splitRule(css);
+    if (!parts?.sel || !parts?.decl || parts.sel.startsWith("@") || !propsOf(parts.decl).length) {
       return { raw: css, meta: meta0 || "manual", key: rawKey(css) };
+    }
+    if (parts.decl.includes("{")) {
+      // Braces may introduce nested rules or simply belong to a string/custom
+      // property. Let Gecko distinguish them; nested CSS needs the raw editor.
+      (ruleProbe ??= new CSSStyleSheet()).replaceSync(css);
+      if (ruleProbe.cssRules.length !== 1 || !(ruleProbe.cssRules[0] instanceof CSSStyleRule) ||
+          ruleProbe.cssRules[0].cssRules.length) {
+        return { raw: css, meta: meta0 || "manual", key: rawKey(css) };
+      }
     }
     const decl = oneLine(parts.decl);
     const group = groupOfDecl(decl);
@@ -633,15 +1759,46 @@
      * CSS it labels; otherwise the CSS is authoritative (self-healing files). */
     const stored = decodeKey(storedKey);
     const keep = stored.kind === "var"
-      ? group === "var" && stored.scope === parts.sel
-      : stored.kind === "sel" && group !== "var" && stored.sel === parts.sel;
-    return { sel: parts.sel, decl, meta: meta0 || "restored", key: keep ? storedKey : derived };
+      ? group === "var" && stored.scope === parts.sel && stored.name === propsOf(decl)[0]
+      : stored.kind === "sel" && group !== "var" && stored.sel === parts.sel && stored.group === group;
+    return { sel: parts.sel, decl, meta: meta0 || "restored",
+      key: keep && stored.kind === "var" ? varKey(stored.scope, stored.name) : keep ? storedKey : derived };
   }
-  const parseLines = (text) => String(text ?? "").split("\n").map(parseRule).filter(Boolean);
+  /* Split only at top-level newlines. A rule inside a multiline comment must
+   * never acquire metadata that would prematurely close the comment. */
+  function parseLines(text) {
+    const source = String(text ?? "");
+    const rules = [];
+    let start = 0, depth = 0, quote = "", comment = false;
+    const push = (end) => {
+      const rule = parseRule(source.slice(start, end));
+      if (rule) rules.push(rule);
+      start = end + 1;
+    };
+    for (let i = 0; i < source.length; i++) {
+      const c = source[i];
+      if (comment) {
+        if (source.startsWith("*/", i)) { comment = false; i++; }
+        continue;
+      }
+      if (c === "\\") { i++; continue; }
+      if (quote) {
+        if (c === quote) quote = "";
+        continue;
+      }
+      if (source.startsWith("/*", i)) { comment = true; i++; continue; }
+      if (c === '"' || c === "'") quote = c;
+      else if (c === "{") depth++;
+      else if (c === "}") depth = Math.max(0, depth - 1);
+      else if (c === "\n" && depth === 0) push(i);
+    }
+    push(source.length);
+    return rules;
+  }
 
   const ruleCss = (r) => (r.raw !== undefined ? r.raw : `${r.sel} { ${r.decl} }`);
   const ruleLine = (r) =>
-    `${ruleCss(r)} /* dusky key=${enc(r.key)}${r.meta ? ` | ${safeMeta(r.meta)}` : ""} */`;
+    r.raw !== undefined ? r.raw : `${ruleCss(r)} /* dusky key=${enc(r.key)}${r.meta ? ` | ${safeMeta(r.meta)}` : ""} */`;
   const serialise = () => S.rules.map((r) => `    ${ruleLine(r)}`).join("\n");
 
   const target = () => S.stack.at(S.depth) ?? null;
@@ -655,9 +1812,15 @@
 
   const PAIRED_ON = {
     primary: "on_primary", primary_container: "on_primary_container",
+    primary_fixed: "on_primary_fixed", primary_fixed_dim: "on_primary_fixed",
     secondary: "on_secondary", secondary_container: "on_secondary_container",
+    secondary_fixed: "on_secondary_fixed", secondary_fixed_dim: "on_secondary_fixed",
     tertiary: "on_tertiary", tertiary_container: "on_tertiary_container",
-    error: "on_error", error_container: "on_error", background: "on_background",
+    tertiary_fixed: "on_tertiary_fixed", tertiary_fixed_dim: "on_tertiary_fixed",
+    error: "on_error", error_container: "on_error_container",
+    background: "on_background", inverse_surface: "inverse_on_surface",
+    inverse_primary: "on_primary_container", surface_tint: "on_primary",
+    source_color: "on_primary", scrim: "on_surface", shadow: "on_surface",
   };
 
   function declFor(group, token) {
@@ -670,8 +1833,12 @@
   }
   const colourGroup = (g) => (GROUPS[g] ? g : "bg");
 
-  const important = (text) => text.split(";").map((d) => d.trim()).filter(Boolean)
-    .map((d) => `${/!important\s*$/i.test(d) ? d : `${d} !important`};`).join(" ");
+  const important = (text) => {
+    const style = document.createElement("div").style;
+    style.cssText = text;
+    for (const name of style) style.setProperty(name, style.getPropertyValue(name), "important");
+    return style.cssText;
+  };
 
   function validSelector(sel) {
     if (typeof sel !== "string" || !sel || sel.length > LIMITS.SEL) return false;
@@ -684,65 +1851,262 @@
     if (!src || src.length > LIMITS.DECL) return "";
     const probe = document.createElement("div");
     try { probe.style.cssText = src; } catch { return ""; }
-    if (!probe.style.length && !/--[\w-]+\s*:/.test(src)) return "";
-    return important(src);
+    if (!probe.style.length) return "";
+    return important(probe.style.cssText);
+  }
+
+  function verifyVariableInheritance(variables, localScope) {
+    const candidates = variables.filter((v) => !v.local);
+    if (!candidates.length) return;
+    // Let Gecko resolve inheritance, including properties registered from page JS.
+    // Two values distinguish inheritance from a matching registered initial value.
+    const parent = document.createElement("span");
+    const child = document.createElement("span");
+    parent.style.setProperty("display", "none", "important");
+    parent.append(child);
+    root.append(parent);
+    const detached = !hostEl.isConnected;
+    if (detached) document.documentElement.append(hostEl);
+    const marker = (v, second) => {
+      if (v.col.shape === "rgb-comma") return second ? "4, 5, 6" : "1, 2, 3";
+      if (v.col.shape === "rgb-triplet") return second ? "4 5 6" : "1 2 3";
+      if (v.col.shape === "hsl-triplet") return second ? "120 50% 40%" : "240 50% 40%";
+      return second ? "rgb(4, 5, 6)" : "rgb(1, 2, 3)";
+    };
+    try {
+      for (const v of candidates) parent.style.setProperty(v.name, marker(v, false));
+      const firstParent = getComputedStyle(parent), firstChild = getComputedStyle(child);
+      const first = candidates.map((v) => [firstParent.getPropertyValue(v.name), firstChild.getPropertyValue(v.name)]);
+      for (const v of candidates) parent.style.setProperty(v.name, marker(v, true));
+      const secondParent = getComputedStyle(parent), secondChild = getComputedStyle(child);
+      candidates.forEach((v, i) => {
+        const value = secondParent.getPropertyValue(v.name);
+        if (value !== first[i][0] && first[i][0] === first[i][1] && value === secondChild.getPropertyValue(v.name)) return;
+        v.global = false;
+        v.local = true;
+        v.scope = localScope();
+      });
+    } finally {
+      parent.remove();
+      if (detached) hostEl.remove();
+    }
   }
 
   function getElementVars(elm) {
     if (elm?.nodeType !== 1) return [];
     const cs = getComputedStyle(elm);
-    const seen = new Set();
-    const out = [];
-    const add = (prop) => {
-      if (!prop?.startsWith("--") || skipVar(prop) || seen.has(prop)) return;
-      const v = cs.getPropertyValue(prop).trim();
-      if (!v) return;
-      seen.add(prop);
-      out.push({ name: prop, value: v.length > 44 ? `${v.slice(0, 41)}…` : v });
+    const rootCs = getComputedStyle(document.documentElement);
+    const bodyCs = document.body ? getComputedStyle(document.body) : rootCs;
+    const out = new Map();
+    const index = propIndex();
+    const owners = new Map();
+    const scopes = new Map();
+    const directRefs = new Set(colorRefs(elm.style));
+    const inheritedRefs = new Set();
+    const depth = new Map();
+    for (let node = elm; node; node = node.parentElement) {
+      depth.set(node, depth.size);
+      const own = node !== document.documentElement;
+      for (const name of node.style) {
+        if (own && name.startsWith("--") && !/^(?:inherit|unset)$/i.test(node.style.getPropertyValue(name).trim()) && !owners.has(name)) owners.set(name, node);
+      }
+      if (node !== elm) for (const name of colorRefs(node.style)) inheritedRefs.add(name);
+    }
+    for (const r of index) {
+      if (r.refs.length && ruleMatches(elm, r)) for (const name of r.refs) directRefs.add(name);
+      let owner, ancestor;
+      try {
+        if (r.props.length) owner = closestRule(elm, r);
+        if (r.refs.length) ancestor = closestRule(elm.parentElement, r);
+      } catch { continue; }
+      if (ancestor) for (const name of r.refs) inheritedRefs.add(name);
+      if (!owner || owner === document.documentElement) continue;
+      for (const name of r.props) {
+        if (/^(?:inherit|unset)$/i.test(r.rule.style.getPropertyValue(name).trim())) continue;
+        if (!owners.has(name) || depth.get(owner) < depth.get(owners.get(name))) owners.set(name, owner);
+      }
+    }
+    const rootScope = ":root";
+    const scopeFor = (node) => {
+      if (!scopes.has(node)) scopes.set(node, candidates(node).at(0)?.sel || selected());
+      return scopes.get(node);
     };
+    const add = (name, used = false, direct = false) => {
+      if (skipVar(name)) return;
+      if (out.has(name)) {
+        const entry = out.get(name);
+        entry.used ||= used;
+        entry.direct ||= direct;
+        return;
+      }
+      const value = cs.getPropertyValue(name).trim() ||
+        rootCs.getPropertyValue(name).trim() ||
+        bodyCs.getPropertyValue(name).trim();
+      let col = parseCssColor(value, elm);
+      if (!col || col.a === 0) {
+        if (!used || !(col?.a === 0 || /^transparent$/i.test(value))) return;
+        col = { r: 0, g: 0, b: 0, a: 1, shape: "color" };
+      }
+      /* A child declaration beats an inherited root declaration, regardless
+       * of the root selector's specificity. Suggest the nearest owner. */
+      const owner = owners.get(name);
+      const global = !owner && rootCs.getPropertyValue(name).trim() === value;
+      const scope = global ? rootScope : scopeFor(owner ?? elm);
+      const label = value || "transparent";
+      out.set(name, { name, value: label.length > 44 ? label.slice(0, 41) + "…" : label,
+        used, direct, scope: scope || selected(), global, local: owner === elm,
+        col });
+    };
+    /* Read authored declarations: computed colours have lost their var() references. */
+    for (const name of directRefs) add(name, true, true);
     for (const cls of elm.classList) {
-      add(/^[a-z-]+-\((--[\w-]+)\)$/.exec(cls)?.[1]);
+      const name = /^[a-z-]+-\((--[\w-]+)\)$/.exec(cls)?.[1];
+      if (name) add(name, true, true);
       const tok = /^[a-z-]+-token-([\w-]+)$/.exec(cls)?.[1];
-      if (tok) add(`--${tok}`);
+      if (tok) add("--" + tok, true, true);
     }
-    for (const p of elm.style) add(p);
-    for (const { sel, props } of propIndex()) {
-      let hit = false;
-      try { hit = elm.matches(sel); } catch { continue; }
-      if (hit) for (const p of props) add(p);
+    // Text, SVG and background colours can be inherited without a declaration on the clicked node.
+    for (const name of inheritedRefs) add(name, true, false);
+    /* Gecko does not enumerate --* on getComputedStyle(); list owners and prop references instead. */
+    for (const name of owners.keys()) add(name);
+    for (const node of [document.documentElement, document.body]) {
+      if (node?.style) for (const name of node.style) if (name.startsWith("--")) add(name);
     }
-    for (const prop of ["background-color", "color", "border-color", "fill"]) {
-      add(/var\((--[\w-]+)/.exec(cs.getPropertyValue(prop))?.[1]);
+    for (const r of index) {
+      for (const name of r.props) add(name);
+      for (const name of r.refs) add(name);
     }
-    return out;
+    for (const name of cs) if (name.startsWith("--")) add(name);
+    verifyVariableInheritance([...out.values()], () => scopeFor(elm));
+    dropProbe();
+    return [...out.values()].sort((a, b) =>
+      Number(b.direct) - Number(a.direct) ||
+      Number(b.used) - Number(a.used) ||
+      Number(isSemanticThemeVar(b.name)) - Number(isSemanticThemeVar(a.name)) ||
+      a.name.localeCompare(b.name));
   }
+
+  function resetVarSelection() {
+    const variable = q("pvar");
+    const scope = q("pvarscope");
+    if (variable) variable.value = "";
+    if (q("psel")) q("psel").value = "";
+    if (scope) scope.value = ":root";
+  }
+
+  function refreshVarScope() {
+    const box = q("pvarscope");
+    const previous = box.value;
+    box.textContent = "";
+    const scopes = new Map([[":root", "Page theme (root)"],
+      ["@owner", "Variable owner"], ["@selected", "Selected elements"]]);
+    for (const [scope, label] of scopes) {
+      box.append(el("option", { value: scope, text: label }));
+    }
+    box.value = scopes.has(previous) ? previous : ":root";
+  }
+
+  const variableScope = (variable = S.elementVars.find((v) => v.name === q("pvar")?.value)) => {
+    const scope = q("pvarscope")?.value;
+    return scope === "@owner" ? variable?.scope || ":root"
+      : scope === "@selected" ? selected() : ":root";
+  };
+  const variablePalette = (token) => paletteValue(token,
+    S.elementVars.find((v) => v.name === q("pvar")?.value)?.col ?? { shape: "color", a: 1 });
 
   /* ══ STYLE ENGINE — one adopted sheet, two cascade layers ═══════════ */
   /* @layer dusky.preview, dusky.live;  ⇒ for !important declarations the
    * EARLIEST layer wins (CSS Cascade 5 §layer ordering), so the preview always
-   * beats the live rule, and both beat the site's unlayered !important CSS. */
+   * beats the live rule, and both beat the site's unlayered !important CSS.
+   * Inline important and earlier page layers retain their CSS-defined priority. */
   const SHEET = new CSSStyleSheet();
   let liveCss = "";
-  let previewCss = "";
+  let paletteCss = "";
+  let previewRules = [];
+  let appliedLive = null, appliedPreview = null;
+  let previewLayer = null;
 
   function flushSheet() {
-    SHEET.replaceSync(
-      "@layer dusky.preview, dusky.live;\n" +
-      `@layer dusky.live{\n${liveCss}\n}\n` +
-      `@layer dusky.preview{\n${previewCss}\n}\n`,
-    );
+    if (!S.active) return;
+    const previewCss = previewRules.join("\n");
+    if (liveCss !== appliedLive) {
+      SHEET.replaceSync(
+        "@layer dusky.preview, dusky.live;\n" +
+        `@layer dusky.live{\n${liveCss}\n}\n`,
+      );
+      // Parse manual live CSS first. Its EOF recovery (an unfinished comment
+      // or brace) must never consume the independently inserted preview layer.
+      const index = SHEET.insertRule("@layer dusky.preview {}", SHEET.cssRules.length);
+      previewLayer = SHEET.cssRules[index];
+      appliedLive = liveCss;
+      appliedPreview = null;
+    }
+    if (previewCss !== appliedPreview) {
+      // Hover changes at most an outline and a mapping. Keep the live rules
+      // parsed instead of rebuilding the entire picked stylesheet each time.
+      while (previewLayer.cssRules.length) previewLayer.deleteRule(previewLayer.cssRules.length - 1);
+      for (const css of previewRules) previewLayer.insertRule(localPalette(css), previewLayer.cssRules.length);
+      appliedPreview = previewCss;
+    }
     if (!document.adoptedStyleSheets.includes(SHEET)) {
       document.adoptedStyleSheets = [...document.adoptedStyleSheets, SHEET];
     }
   }
   function detachSheet() {
-    liveCss = previewCss = "";
+    liveCss = ""; paletteCss = ""; previewRules = [];
+    appliedLive = appliedPreview = null;
+    previewLayer = null;
     document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== SHEET);
   }
 
-  const renderLive = () => { liveCss = S.rules.map(ruleCss).join("\n"); flushSheet(); };
+  // Private preview names avoid repainting sites that already own --primary,
+  // --background, etc. Persisted templates retain Dusky Sites' public names.
+  function localPalette(css) {
+    let result = css;
+    for (const { name, start, end } of variableReferences(css).reverse()) {
+      if (!PALETTE_OWNED.has(name.slice(2).replace(PALETTE_SUFFIX, ""))) continue;
+      result = result.slice(0, start) + `--dusky-picker-${name.slice(2)}` + result.slice(end);
+    }
+    return result;
+  }
 
-  const OUTLINE = "outline:2px dashed #e6c280 !important;outline-offset:-2px !important";
+  const renderLive = () => { liveCss = paletteCss + "\n" + S.rules.map((r) => localPalette(ruleCss(r))).join("\n"); flushSheet(); };
+
+  async function loadPalette() {
+    S.paletteNote = "";
+    const reply = await send({ type: "palette" });
+    if (!reply?.ok) {
+      if (!paletteLoaded()) S.paletteNote = `Palette unavailable: ${reply?.error ?? "no reply"}`;
+      else {
+        const palette = getComputedStyle(document.documentElement);
+        const declarations = [];
+        const colors = {};
+        for (const token of PALETTE_OWNED) for (const suffix of ["", "_rgb", "_rgb_comma", "_hsl"]) {
+          const value = palette.getPropertyValue(`--${token}${suffix}`).trim();
+          if (value && !/[;{}]/.test(value)) {
+            declarations.push(`--dusky-picker-${token}${suffix}:${value} !important;`);
+            hostEl.style.setProperty(`--dusky-picker-${token}${suffix}`, value, "important");
+            colors[`--${token}${suffix}`] = value;
+          }
+        }
+        paletteCss = `:root{${declarations.join("")}}`;
+        theme.apply(hostEl, colors);
+      }
+      baseState();
+      return;
+    }
+    const declarations = [];
+    for (const [name, value] of Object.entries(reply.colors ?? {})) {
+      if (!/^--[\w-]+$/.test(name) || typeof value !== "string" || /[;{}]/.test(value)) continue;
+      if (!PALETTE_OWNED.has(name.slice(2).replace(PALETTE_SUFFIX, ""))) continue;
+      declarations.push(`--dusky-picker-${name.slice(2)}:${value} !important;`);
+      hostEl.style.setProperty(`--dusky-picker-${name.slice(2)}`, value, "important");
+    }
+    paletteCss = `:root{${declarations.join("")}}`;
+    theme.apply(hostEl, reply.colors);
+  }
+
+  const OUTLINE = "outline:2px dashed var(--dusky-picker-primary, #a8ceff) !important;outline-offset:-2px !important";
 
   /* THE single preview entry point — pick mode, edit mode, chips, drawer rows
    * and the extra buttons all go through here, so they cannot diverge. */
@@ -754,10 +2118,10 @@
         chunks.push(`${spec.highlight}{${OUTLINE}}`);
       }
       if (spec.css) chunks.push(spec.css);
-      previewCss = chunks.join("\n");
+      previewRules = chunks;
       flushSheet();
     },
-    clear() { previewCss = ""; flushSheet(); },
+    clear() { previewRules = []; flushSheet(); },
   };
 
   /* Build a preview spec for ANY rule key + token. Used by edit mode. */
@@ -765,81 +2129,84 @@
     const k = decodeKey(key);
     if (k.kind === "var") {
       const scope = sel || k.scope || ROOT_ARMOR;
+      if (!validSelector(scope)) return { highlight: "", css: "" };
       return token
-        ? { highlight: scope === ROOT_ARMOR ? "" : scope, css: `${scope}{${k.name}: var(--${token}) !important}` }
+        ? { highlight: scope === ROOT_ARMOR ? "" : scope, css: `${scope}{${remapVariable(k.name, decl, token)}}` }
         : { highlight: scope === ROOT_ARMOR ? "" : scope, css: "" };
     }
     if (k.kind === "raw") return { highlight: "", css: "" };
     const useSel = sel || k.sel;
+    if (!validSelector(useSel)) return { highlight: "", css: "" };
     if (!token) return { highlight: useSel, css: "" };
     if (k.group === "display") {
       /* A hidden element cannot show a colour: preview the un-hide instead. */
       return { highlight: useSel, css: `${useSel}{display:revert !important;${OUTLINE}}` };
     }
     if (k.group?.startsWith("custom:")) {
-      /* Substitute the token into the existing var() if the rule has one,
-       * otherwise just highlight — never lie with an unrelated background. */
-      const swapped = String(decl ?? "").replaceAll(/var\(\s*--[a-z0-9_]+/gi, `var(--${token}`);
-      return { highlight: useSel, css: swapped === decl ? "" : `${useSel}{${swapped}}` };
+      const swapped = remapPalette(decl, token);
+      return { highlight: useSel, css: `${useSel}{${swapped === decl ? declFor(colourGroup(k.group), token) : swapped}}` };
     }
     return { highlight: useSel, css: `${useSel}{${declFor(colourGroup(k.group), token)}}` };
   }
 
   /* ══ Shadow UI ══════════════════════════════════════════════════════ */
   const UI_CSS = `
-:host{all:initial!important;display:block!important;position:fixed!important;inset:0 auto auto 0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none!important;isolation:isolate!important}
+:host{all:initial!important;color-scheme:var(--dusky-ui-scheme,dark)!important;display:block!important;position:fixed!important;inset:0 auto auto 0!important;width:0!important;height:0!important;overflow:visible!important;z-index:2147483647!important;pointer-events:none!important;isolation:isolate!important}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 button,input,select,textarea{font:inherit;color:inherit;background:none;border:0}
-.mask{position:fixed;display:none;pointer-events:none;outline:2px dashed #e6c280;outline-offset:-2px;background:rgba(230,194,128,.07);border-radius:2px}
-.panel{position:fixed;pointer-events:auto;background:#191614;color:#f5ebe0;border:1px solid #3d342c;border-radius:10px;box-shadow:0 14px 44px rgba(0,0,0,.65);font:13px/1.45 system-ui,sans-serif;display:flex;flex-direction:column;gap:6px;padding:8px;transition:opacity .12s ease}
-.panel.ghost{opacity:.25}
-.panel.ghost:hover,.panel.ghost:focus-within{opacity:1}
+.mask{position:fixed;display:none;pointer-events:none;outline:2px dashed var(--dusky-ui-primary);outline-offset:-2px;background:color-mix(in srgb,var(--dusky-ui-primary) 7%,transparent);border-radius:2px}
+.panel{position:fixed;pointer-events:auto;background:var(--dusky-ui-panel);color:var(--dusky-ui-text);border:1px solid var(--dusky-ui-border);border-radius:10px;box-shadow:0 14px 44px rgba(0,0,0,.65);font:13px/1.45 system-ui,sans-serif;display:flex;flex-direction:column;gap:6px;padding:8px}
 .bar{top:10px;left:50%;transform:translateX(-50%);flex-direction:row;align-items:center;gap:6px;padding:6px 8px;max-width:min(96vw,980px)}
-.dlg{top:64px;right:16px;width:440px;max-height:calc(100vh - 88px);overflow:auto}
-.drawer{right:16px;bottom:16px;width:420px;max-height:62vh;overflow:hidden}
+.dlg{top:var(--dusky-dialog-top,64px);right:16px;width:440px;max-width:calc(100vw - 32px);max-height:calc(100vh - var(--dusky-dialog-top,64px) - 24px);overflow:auto}
+.drawer{right:16px;bottom:16px;width:420px;max-width:calc(100vw - 32px);max-height:62vh;overflow:hidden}
 .head{display:flex;align-items:center;gap:6px;cursor:grab;user-select:none}
 .head:active{cursor:grabbing}
-.grip{color:#6d645a;font-size:12px}
-.title{flex:1;font-weight:700;color:#e6c280;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.info{color:#c4b8aa;font:11.5px ui-monospace,monospace;max-width:38ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.state{font-size:11px;color:#c4b8aa;max-width:34ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.state.ok{color:#81c784}.state.err{color:#e57373}.state.warn{color:#e6c280}
-.panel button{cursor:pointer;background:#2d2722;border:1px solid #3d342c;border-radius:7px;padding:4px 8px;color:#f5ebe0;white-space:nowrap}
-.panel button:hover:not(:disabled){border-color:#d4a359}
+.grip{color:var(--dusky-ui-muted);font-size:12px}
+.title{flex:1;font-weight:700;color:var(--dusky-ui-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.info{color:var(--dusky-ui-muted);font:11.5px ui-monospace,monospace;max-width:38ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.state{font-size:11px;color:var(--dusky-ui-muted);max-width:34ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.state.ok{color:var(--dusky-ui-success)}.state.err{color:var(--dusky-ui-error)}.state.warn{color:var(--dusky-ui-warning)}
+.panel button{cursor:pointer;background:var(--dusky-ui-control);border:1px solid var(--dusky-ui-border);border-radius:7px;padding:4px 8px;color:var(--dusky-ui-text);white-space:nowrap}
+.panel button:hover:not(:disabled):not([aria-pressed="true"]){border-color:var(--dusky-ui-primary);background:var(--dusky-ui-hover)}
 .panel button:disabled{opacity:.4;cursor:default}
-.panel button:focus-visible,.panel select:focus-visible,.panel input:focus-visible,.panel textarea:focus-visible{outline:2px solid #e6c280;outline-offset:1px}
-.panel button.x{border-color:#6d3b40;color:#ffb4ab}
+.panel button:focus-visible,.panel select:focus-visible,.panel input:focus-visible,.panel textarea:focus-visible{outline:2px solid var(--dusky-ui-primary);outline-offset:1px}
+.panel button.x{border-color:var(--dusky-ui-error);color:var(--dusky-ui-error)}
 .panel button.grow{flex:1;justify-content:center;text-align:center}
 .row{display:flex;align-items:center;gap:6px}
 .row[hidden]{display:none!important}
-.lbl{flex:0 0 68px;color:#8f857a;font-size:11.5px}
-.tag{flex:1;font:11.5px ui-monospace,monospace;color:#e6c280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.panel select,.panel input[type=text],.panel textarea{flex:1;min-width:0;background:#0f0d0c;border:1px solid #3d342c;border-radius:7px;padding:4px 6px;font:11.5px ui-monospace,monospace;color:#f5ebe0}
+.lbl{flex:0 0 68px;color:var(--dusky-ui-muted);font-size:11.5px}
+.tag{flex:1;font:11.5px ui-monospace,monospace;color:var(--dusky-ui-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.panel select,.panel input[type=text],.panel textarea{flex:1;min-width:0;background:var(--dusky-ui-field);border:1px solid var(--dusky-ui-border);border-radius:7px;padding:4px 6px;font:11.5px ui-monospace,monospace;color:var(--dusky-ui-text)}
 .panel textarea{min-height:64px;resize:vertical}
-.panel input[type=range]{flex:1;accent-color:#e6c280}
-.seg{display:flex;flex:1;gap:2px;background:#0f0d0c;border:1px solid #3d342c;border-radius:7px;padding:2px}
+.panel input[type=range]{flex:1;accent-color:var(--dusky-ui-primary)}
+.seg{display:flex;flex:1;gap:2px;background:var(--dusky-ui-field);border:1px solid var(--dusky-ui-border);border-radius:7px;padding:2px}
 .seg button{flex:1;border:0;background:transparent;padding:3px 4px;font-size:11.5px;border-radius:5px}
-.seg button[aria-pressed="true"]{background:#e6c280;color:#191614;font-weight:700}
-.panel button[aria-pressed="true"]{background:#e6c280;color:#191614;border-color:#e6c280}
+.seg button[aria-pressed="true"]{background:var(--dusky-ui-primary);color:var(--dusky-ui-on-primary);font-weight:700}
+.panel button[aria-pressed="true"]{background:var(--dusky-ui-primary);color:var(--dusky-ui-on-primary);border-color:var(--dusky-ui-primary)}
 .swatches{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;max-height:260px;overflow:auto;padding:2px 0}
 .swatch{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:5px 8px}
-.swatch[aria-pressed="true"]{border-color:#e6c280}
-.chip,.dot{width:14px;height:14px;border-radius:4px;border:1px solid #3d342c;flex:0 0 auto;display:inline-block;background:#333}
+.swatch[aria-pressed="true"]{border-color:var(--dusky-ui-primary)}
+.chip,.dot{width:14px;height:14px;border-radius:4px;border:1px solid var(--dusky-ui-border);flex:0 0 auto;display:inline-block;background:var(--dusky-ui-control)}
 .swatch-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px}
-.hint,.lead{color:#8f857a;font-size:11.5px;line-height:1.4}
-.lead{color:#c4b8aa}
+.hint,.lead{color:var(--dusky-ui-muted);font-size:11.5px;line-height:1.4}
+.lead{color:var(--dusky-ui-muted)}
 .list{overflow:auto;max-height:48vh;display:flex;flex-direction:column;gap:4px}
 .item{display:flex;gap:4px;align-items:stretch}
 .item .open{flex:1;display:flex;align-items:center;gap:8px;min-width:0;text-align:left}
-.item .sel{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:11.5px ui-monospace,monospace;color:#e6c280}
-.item .meta{color:#8f857a;font-size:10.5px;white-space:nowrap}
+.item .sel{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:11.5px ui-monospace,monospace;color:var(--dusky-ui-primary)}
+.item .meta{color:var(--dusky-ui-muted);font-size:10.5px;white-space:nowrap}
 .item .del{flex:0 0 auto}
 .bar{flex-wrap:wrap}
 .seg{flex-wrap:wrap}
+.panel [hidden]{display:none!important}
+.targets{display:flex;flex-direction:column;gap:4px;max-height:280px;overflow:auto;padding:2px}
+.panel .target-choice{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;white-space:normal;width:100%}
+.target-choice .name{font:11.5px ui-monospace,monospace;overflow-wrap:anywhere;color:var(--dusky-ui-primary)}
+.target-choice .detail{font-size:11px;color:var(--dusky-ui-muted)}
 `;
 
   const uiStyle = document.createElement("style");
-  uiStyle.textContent = UI_CSS;
+  uiStyle.textContent = theme.css + UI_CSS;
   root.append(uiStyle);
 
   const maskEl = document.createElement("div");
@@ -879,20 +2246,27 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
   <input type="range" id="pslider" min="0" max="0" value="0" aria-label="DOM depth">
   <span class="tag" id="pdepth" style="flex:0 0 40px;text-align:right"></span>
 </div>
-<div class="row" id="psel-row">
-  <span class="lbl">Matches</span>
-  <select id="psel" title="CSS selector written into the template. Prefer rows that say 'this element only'."></select>
-</div>
+<input id="psel" type="hidden">
+<input id="pvar" type="hidden">
 <div class="row">
   <span class="lbl">Mode</span>
   <div class="seg">
-    <button type="button" id="pmode-sel" aria-pressed="true" title="Paint this element's background, text, border or fill">Element</button>
-    <button type="button" id="pvarbtn" aria-pressed="false" title="Point one of this element's CSS variables at a Matugen token">CSS variable</button>
+    <button type="button" id="pvarbtn" aria-pressed="true" title="Point a CSS variable at a Matugen token">CSS variable</button>
+    <button type="button" id="pmode-sel" aria-pressed="false" title="Paint elements directly">Element</button>
   </div>
 </div>
-<div class="row" id="pvar-row" hidden>
-  <span class="lbl">Variable</span>
-  <select id="pvar" title="Custom properties found on this element"></select>
+<div class="row" id="pvarscope-row" hidden>
+  <span class="lbl">Scope</span>
+  <select id="pvarscope" title="Override this token for the page theme, its owner, or the selected elements"></select>
+</div>
+<div id="pchoose">
+  <p class="hint" id="pchoose-hint">1. Choose what to affect — hover previews with Primary; click continues.</p>
+  <div class="targets" id="ptargets" role="group" aria-label="Choose what to affect"></div>
+</div>
+<div id="pcolors" hidden>
+<div class="row">
+  <button type="button" id="pback">← Back</button>
+  <span class="tag" id="pchosen"></span>
 </div>
 <div class="row" id="pseg-row">
   <span class="lbl">Part</span>
@@ -912,6 +2286,7 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
 <div class="row" id="pcustom-row">
   <span class="lbl">Custom</span>
   <input id="pcustom" type="text" placeholder="or type CSS, then Enter — e.g. opacity: 0.8" title="Any declaration list. Saved as a picked rule.">
+</div>
 </div>`;
 
   const EDIT_HTML = `
@@ -986,8 +2361,9 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
 
   function setState(text, kind = "") {
     const n = q("bstate");
-    if (!n) { S.note = text; return; }
+    if (!n) return;
     n.textContent = text;
+    n.title = text;
     n.className = `state ${kind}`;
   }
 
@@ -996,7 +2372,8 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     const label = t
       ? `${t.localName}${t.id ? "#" + t.id : ""}`
       : "click an element";
-    setState(S.note || (S.hydrated ? label : "host unreachable"), S.note ? "err" : "");
+    setState(S.note || S.paletteNote || (S.hydrated ? label : "host unreachable"),
+      S.note || S.paletteNote ? "err" : "");
   }
 
   function flash(text, kind = "ok") {
@@ -1026,7 +2403,6 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
       node.style.right = "auto";
       node.style.bottom = "auto";
       node.style.transform = "none";
-      S.panelPos = { x, y };
     });
     handle.addEventListener("pointerup", () => { dragging = false; });
   }
@@ -1076,7 +2452,7 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
       if (!sel || seen.has(sel) || sel.length > LIMITS.SEL || !validSelector(sel)) return;
       let n = 0;
       try { n = document.querySelectorAll(sel).length; } catch { return; }
-      if (!n) return;
+      if (!n || !elm.matches(sel)) return;
       seen.add(sel);
       out.push({ sel, n });
     };
@@ -1087,8 +2463,10 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     for (const c of classes.slice(0, 2)) add(`.${CSS.escape(c)}`);
     const role = elm.getAttribute("role");
     if (role) add(`${tag}[role=${cssString(role)}]`);
-    const testid = elm.getAttribute("data-testid") || elm.getAttribute("data-test");
-    if (testid) add(`[data-testid=${cssString(testid)}]`);
+    for (const attr of ["data-testid", "data-test"]) {
+      const value = elm.getAttribute(attr);
+      if (value) add(`[${attr}=${cssString(value)}]`);
+    }
     const name = elm.getAttribute("name");
     if (name) add(`${tag}[name=${cssString(name)}]`);
     const aria = elm.getAttribute("aria-label");
@@ -1104,7 +2482,7 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
   function selected() {
     const box = q("psel");
     if (box?.value) return box.value.trim();
-    return candidates(target()).at(0)?.sel ?? "";
+    return S.selectors.at(0)?.sel ?? "";
   }
 
   function describe(node) {
@@ -1128,7 +2506,7 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     if (S.targetMode === "variable") {
       const name = q("pvar")?.value;
       return token && name
-        ? { highlight: "", css: `${ROOT_ARMOR}{${name}: var(--${token}) !important}` }
+        ? { highlight: "", css: `${variableScope()}{${CSS.escape(name)}: ${variablePalette(token)} !important}` }
         : { highlight: selected(), css: "" };
     }
     const sel = selected();
@@ -1157,7 +2535,7 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
           "data-token": token, "aria-label": label,
         });
         b.append(
-          el("i", { class: "chip", style: { background: `var(--${token}, #333)` } }),
+          el("i", { class: "chip", style: { background: `var(--dusky-picker-${token}, var(--dusky-ui-control))` } }),
           el("span", { class: "swatch-name", text: label }),
         );
         b.addEventListener("pointerenter", () => this.onHover?.(token));
@@ -1169,6 +2547,14 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
       }
       this.mount.append(wrap);
       this.buttons = [...wrap.children];
+      this.refreshAvailability();
+    }
+    refreshAvailability() {
+      for (const b of this.buttons) {
+        const token = b.dataset.token, label = b.getAttribute("aria-label");
+        const val = hostEl.style.getPropertyValue(`--dusky-picker-${token}`).trim();
+        b.title = val ? `${label} — var(--${token}) (${val})` : `${label} — var(--${token})`;
+      }
     }
     setActive(token) {
       this.active = token || "";
@@ -1230,12 +2616,52 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     else if (panelKind === "edit") refreshEdit();
   }
 
-  function refreshPick(rebuildSels = false) {
+  function positionDialog() {
+    if (panel && bar) panel.style.setProperty("--dusky-dialog-top", `${Math.max(64, bar.getBoundingClientRect().bottom + 8)}px`);
+  }
+
+  function buildPickTargets() {
+    const list = q("ptargets");
+    list.textContent = "";
+    list.dataset.mode = S.targetMode;
+    const variable = S.targetMode === "variable";
+    const choices = variable ? S.elementVars : S.selectors;
+    for (const choice of choices) {
+      const value = variable ? choice.name : choice.sel;
+      const detail = variable ? `${choice.used ? "Referenced" : "Not found in this element's color rules"} · ${choice.value}`
+        : choice.n === 1 ? "This element only" : `Matches ${choice.n} elements`;
+      const button = el("button", { type: "button", class: "target-choice", "data-value": value },
+        el("span", { class: "name", text: value }), el("span", { class: "detail", text: detail }));
+      const preview = () => {
+        if (S.pickStep !== "target") return;
+        Preview.show(variable
+          ? { highlight: "", css: `${variableScope(choice)}{${CSS.escape(value)}:${paletteValue("primary", choice.col)} !important;}` }
+          : { highlight: value, css: `${value}{${declFor(colourGroup(S.group), "primary")}}` });
+      };
+      const leave = () => { if (S.pickStep === "target") Preview.clear(); };
+      button.addEventListener("pointerenter", preview);
+      button.addEventListener("pointerleave", leave);
+      button.addEventListener("focus", preview);
+      button.addEventListener("blur", leave);
+      button.addEventListener("click", () => {
+        Preview.clear();
+        q(variable ? "pvar" : "psel").value = value;
+        S.pickStep = "color";
+        refreshPick(false);
+        // Moving focus clears the target preview and gives keyboard users the palette.
+        q("pback").focus();
+      });
+      list.append(button);
+    }
+    if (!choices.length) list.append(el("p", { class: "hint", text: "No targets found — choose another page element." }));
+  }
+
+  function refreshPick(rebuildTargets = false) {
     if (panelKind !== "pick" || !panel) return;
     const t = target();
     q("ptitle").textContent = t ? `Theme <${t.localName}>` : "Theme this element";
     q("pinfo").textContent = t
-      ? `${describe(t)} — pick a unique selector, a part, then a colour.`
+      ? `${describe(t)} — choose a colour variable or theme this element directly.`
       : "Click anything on the page.";
 
     const stackBox = q("pstack");
@@ -1257,39 +2683,19 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     const dt = q("pdepth");
     if (dt) dt.textContent = S.stack.length > 1 ? `${S.depth}/${S.stack.length - 1}` : "";
 
-    if (rebuildSels) {
-      const box = q("psel");
-      const prev = box.value;
-      box.textContent = "";
-      for (const c of candidates(t)) {
-        const opt = document.createElement("option");
-        opt.value = c.sel;
-        opt.textContent = c.n === 1 ? `${c.sel}  (this element only)` : `${c.sel}  (matches ${c.n})`;
-        box.append(opt);
-      }
-      if ([...box.options].some((o) => o.value === prev)) box.value = prev;
-    }
-
     const varMode = S.targetMode === "variable";
     q("pmode-sel").setAttribute("aria-pressed", String(!varMode));
     q("pvarbtn").setAttribute("aria-pressed", String(varMode));
     q("pvarbtn").disabled = S.elementVars.length === 0;
-    q("pvar-row").hidden = !varMode;
+    q("pvarscope-row").hidden = !varMode;
     q("pseg-row").hidden = varMode;
-    q("psel-row").hidden = varMode;
-
-    if (varMode) {
-      const box = q("pvar");
-      const prev = box.value;
-      box.textContent = "";
-      for (const v of S.elementVars) {
-        const opt = document.createElement("option");
-        opt.value = v.name;
-        opt.textContent = `${v.name}  =  ${v.value}`;
-        box.append(opt);
-      }
-      if ([...box.options].some((o) => o.value === prev)) box.value = prev;
-    }
+    refreshVarScope();
+    const choosing = S.pickStep === "target";
+    q("pchoose").hidden = !choosing;
+    q("pcolors").hidden = choosing;
+    q("pchosen").textContent = varMode ? q("pvar").value : selected();
+    q("pchosen").title = q("pchosen").textContent;
+    if (rebuildTargets || q("ptargets").dataset.mode !== S.targetMode) buildPickTargets();
 
     for (const b of q("pseg").children) {
       b.setAttribute("aria-pressed", String(b.dataset.group === S.group));
@@ -1298,20 +2704,24 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     q("pextra").textContent = extra?.label ?? "";
     q("pextra").hidden = varMode || !extra;
     q("phint").textContent = varMode
-      ? "Hover a swatch to preview remapping this variable across the page; click saves."
-      : "Hover previews · click saves · Shift+click hides.";
+      ? "2. Choose a color — hover previews; click saves the variable mapping." +
+        (S.elementVars.find((v) => v.name === q("pvar")?.value)?.used ? "" :
+          " This variable was not found in this element's color rules; it may have no visible effect.")
+      : "2. Choose a color — hover previews; click saves · Shift+click hides.";
     pickGrid?.setActive("");
+    positionDialog();
   }
 
   function applyPick(token) {
     if (S.targetMode === "variable") {
       const name = q("pvar")?.value;
       if (!name) { flash("pick a CSS variable first", "err"); return; }
+      const scope = variableScope();
       upsert({
-        sel: ROOT_ARMOR,
-        decl: `${name}: var(--${token}) !important;`,
+        sel: scope,
+        decl: `${CSS.escape(name)}: ${variablePalette(token)} !important;`,
         meta: `var ${name} → ${token}`,
-        key: varKey(ROOT_ARMOR, name),
+        key: varKey(scope, name),
       });
       flash(`✓ ${name} → ${token}`);
       return;
@@ -1357,7 +2767,7 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     }
     const dt = q("pdepth");
     if (dt) dt.textContent = S.stack.length > 1 ? `${S.depth}/${S.stack.length - 1}` : "";
-    Preview.show(previewOf(null));
+    Preview.clear();
   }
 
   function bindPick() {
@@ -1368,18 +2778,23 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
       syncDepthChrome();
     });
     q("pslider").addEventListener("change", () => { retarget(); });
-    q("psel").addEventListener("change", () => Preview.show(previewOf(null)));
-    q("pvar").addEventListener("change", () => Preview.show(previewOf(null)));
-    q("pmode-sel").addEventListener("click", () => {
-      S.targetMode = "selector";
+    q("pback").addEventListener("click", () => {
+      Preview.clear();
+      S.pickStep = "target";
       refreshPick(false);
-      Preview.show(previewOf(null));
+      const chosen = S.targetMode === "variable" ? q("pvar").value : selected();
+      [...q("ptargets").children].find((b) => b.dataset.value === chosen)?.focus();
     });
+    q("pvarscope").addEventListener("change", () => Preview.clear());
+    const mode = (name) => {
+      Preview.clear();
+      S.targetMode = name;
+      S.pickStep = "target";
+      refreshPick(true);
+    };
+    q("pmode-sel").addEventListener("click", () => mode("selector"));
     q("pvarbtn").addEventListener("click", () => {
-      if (!S.elementVars.length) return;
-      S.targetMode = "variable";
-      refreshPick(false);
-      Preview.show(previewOf(null));
+      if (S.elementVars.length) mode("variable");
     });
     q("pseg").addEventListener("click", (e) => {
       const b = e.target.closest("[data-group]");
@@ -1439,19 +2854,24 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
 
   function openPick() {
     S.locked = true;
+    dropIndex();
+    S.selectors = candidates(target());
     S.elementVars = getElementVars(target());
-    if (!S.elementVars.length) S.targetMode = "selector";
+    resetVarSelection();
+    S.targetMode = S.elementVars.length ? "variable" : "selector";
+    S.pickStep = "target";
     if (panelKind !== "pick" || !panel) {
       panel?.remove();
       editGrid = null;
       panelKind = "pick";
-      panel = el("section", { class: "panel dlg ghost", role: "dialog", "aria-label": "Theme this element" });
+      panel = el("section", { class: "panel dlg", role: "dialog", "aria-label": "Theme this element" });
       panel.innerHTML = PICK_HTML;
       root.append(panel);
       drag(panel, q("phead"));
       bindPick();
     }
     refreshPick(true);
+    drawMask();
     Preview.show(previewOf(null));
     refreshBar();
   }
@@ -1505,7 +2925,7 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
       panel?.remove();
       pickGrid = null;
       panelKind = "edit";
-      panel = el("section", { class: "panel dlg ghost", role: "dialog", "aria-label": "Edit a saved rule" });
+      panel = el("section", { class: "panel dlg", role: "dialog", "aria-label": "Edit a saved rule" });
       panel.innerHTML = EDIT_HTML;
       root.append(panel);
       drag(panel, q("ehead"));
@@ -1523,7 +2943,7 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     if (k.kind === "var") {
       writeRule(r.key, {
         sel: r.sel,
-        decl: `${k.name}: var(--${token}) !important;`,
+        decl: remapVariable(k.name, r.decl, token),
         meta: `var ${k.name} → ${token}`,
         key: varKey(r.sel, k.name),
       });
@@ -1531,13 +2951,14 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
       return;
     }
     if (r.raw !== undefined || k.kind === "raw") return;
-    if (k.kind === "sel" && typeof k.group === "string" && k.group.startsWith("custom:")) {
-      const swapped = String(r.decl ?? "").replaceAll(/var\(\s*--[a-z0-9_]+/gi, `var(--${token}`);
+    if (k.group === "display") return;
+    if (k.kind === "sel" && typeof k.group === "string" && k.group.startsWith("custom:") && tokenOf(r.decl)) {
+      const swapped = remapPalette(r.decl, token);
       writeRule(r.key, {
         sel: r.sel,
-        decl: swapped === r.decl ? declFor("bg", token) : important(swapped),
+        decl: important(swapped),
         meta: `${k.group}: ${token}`,
-        key: swapped === r.decl ? selKey(r.sel, "bg") : r.key,
+        key: r.key,
       });
       flash(`✓ ${token}`);
       return;
@@ -1567,26 +2988,19 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     if (!r || r.raw !== undefined) return;
     const decl = normaliseDecl(q("ecustom").value);
     if (!decl) { flash("that is not a valid declaration", "err"); return; }
-    const k = decodeKey(r.key);
-    if (k.kind === "var") {
-      const first = propsOf(decl)[0] ?? "";
-      const name = first.startsWith("--") ? first : k.name;
-      writeRule(r.key, {
-        sel: r.sel, decl, meta: `var ${name} → ${tokenOf(decl) || "custom"}`, key: varKey(r.sel, name),
-      });
-    } else {
-      const group = groupOfDecl(decl);
-      writeRule(r.key, {
-        sel: r.sel, decl, meta: `${group}: ${tokenOf(decl) || "custom"}`, key: selKey(r.sel, group),
-      });
-    }
+    const group = groupOfDecl(decl);
+    const name = group === "var" ? propsOf(decl)[0] : "";
+    writeRule(r.key, {
+      sel: r.sel, decl, meta: `${group}: ${tokenOf(decl) || "custom"}`,
+      key: group === "var" ? varKey(r.sel, name) : selKey(r.sel, group),
+    });
     flash("✓ declaration updated");
   }
 
   function commitRaw() {
     const r = currentEdit();
     if (!r) return;
-    const next = parseRule(oneLine(q("eraw").value));
+    const next = parseRule(q("eraw").value);
     if (!next) { flash("nothing to save", "err"); return; }
     writeRule(r.key, next);
     flash("✓ rule updated");
@@ -1611,11 +3025,12 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     if (isRaw && q("eraw") !== root.activeElement) q("eraw").value = r.raw;
     q("ecustom-row").hidden = isRaw;
     if (!isRaw && q("ecustom") !== root.activeElement) q("ecustom").value = r.decl;
-    q("egrid").hidden = isRaw;
+    q("egrid").hidden = isRaw || k.group === "display";
 
     const group = k.kind === "sel" ? colourGroup(k.group) : "";
     for (const b of q("eseg").children) b.setAttribute("aria-pressed", String(b.dataset.group === group));
-    editGrid?.setActive(tokenOf(r.decl));
+    editGrid?.setActive(tokenOf(r.decl).replace(PALETTE_SUFFIX, ""));
+    positionDialog();
 
     q("ehint").textContent = isRaw
       ? "Hand-written rule — edit the CSS and press Tab/Enter to save it."
@@ -1649,9 +3064,9 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
       return;
     }
     for (const r of S.rules) {
-      const tok = tokenOf(r.decl);
+      const tok = tokenOf(r.decl).replace(PALETTE_SUFFIX, "");
       const open = el("button", { class: "open", type: "button", title: ruleLine(r), onclick: () => openEdit(r) },
-        el("i", { class: "dot", style: { background: tok ? `var(--${tok}, transparent)` : "transparent" } }),
+        el("i", { class: "dot", style: { background: tok ? `var(--dusky-picker-${tok}, transparent)` : "transparent" } }),
         el("span", { class: "sel", text: r.raw !== undefined ? r.raw : r.sel }),
         el("span", { class: "meta", text: r.meta || "manual" }));
       /* Hover here previews the rule — and leaving restores whatever the open
@@ -1677,6 +3092,7 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
 
   function commit() {
     S.generation++;
+    previewRules = [];
     renderLive();
     refreshBar();
     refreshDrawer();
@@ -1697,7 +3113,7 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     const i = S.rules.findIndex((r) => r.key === rule.key);
     if (i < 0 && S.rules.length >= LIMITS.RULES) { flash(`rule limit (${LIMITS.RULES}) reached`, "err"); return; }
     snapshot();
-    const next = S.rules.slice();
+    const next = S.rules.filter((r, at) => r.key !== rule.key || at === i);
     if (i >= 0) next[i] = rule; else next.push(rule);
     S.rules = Object.freeze(next);
     commit();
@@ -1732,16 +3148,49 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
   const send = (msg) => browser.runtime.sendMessage({ ...msg, origin: ORIGIN })
     .catch((e) => ({ ok: false, error: String(e?.message ?? e) }));
 
-  /* Keep local rules, adopt anything new that appeared on disk. */
+  let diskRules = Object.freeze([]);
+
   function mergeForeign(foreignPicks) {
+    const base = new Map(diskRules.map((r) => [r.key, ruleCss(r)]));
     const mine = new Map(S.rules.map((r) => [r.key, r]));
-    const merged = [];
-    for (const r of parseLines(foreignPicks)) {
-      if (mine.has(r.key)) { merged.push(mine.get(r.key)); mine.delete(r.key); }
-      else merged.push(r);
+    const foreign = parseLines(foreignPicks);
+    const rawCounts = (rules) => {
+      const counts = new Map();
+      for (const rule of rules) if (rule.raw !== undefined) counts.set(rule.key, (counts.get(rule.key) ?? 0) + 1);
+      return counts;
+    };
+    const baseRaw = rawCounts(diskRules), mineRaw = rawCounts(S.rules);
+    const remaining = rawCounts(foreign);
+    // Raw identity is its CSS text, so equal copies share a key. A local
+    // count change is an edit to that key; unchanged counts adopt disk.
+    for (const key of new Set([...baseRaw.keys(), ...mineRaw.keys()])) {
+      const count = mineRaw.get(key) ?? 0;
+      if (count !== (baseRaw.get(key) ?? 0)) remaining.set(key, count);
     }
-    merged.push(...mine.values());
-    S.rules = Object.freeze(merged);
+    const merged = [];
+    const seen = new Set();
+    for (const rule of foreign) {
+      if (rule.raw !== undefined) {
+        const count = remaining.get(rule.key) ?? 0;
+        if (count) { merged.push(rule); remaining.set(rule.key, count - 1); }
+        continue;
+      }
+      const local = mine.get(rule.key);
+      if (!local && base.has(rule.key)) continue;  /* deleted locally */
+      merged.push(local && base.get(rule.key) !== ruleCss(local) ? local : rule);
+      seen.add(rule.key);
+    }
+    for (const rule of S.rules) {
+      const key = rule.key;
+      if (rule.raw !== undefined) {
+        const count = remaining.get(key) ?? 0;
+        if (count) { merged.push(rule); remaining.set(key, count - 1); }
+      } else if (!seen.has(key) && base.get(key) !== ruleCss(mine.get(key))) {
+        merged.push(mine.get(key)); seen.add(key);
+      }
+    }
+    diskRules = Object.freeze(foreign);
+    S.rules = Object.freeze(merged);               /* preserve repeated raw lines */
   }
 
   let saveInFlight = null;
@@ -1754,12 +3203,16 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     if (saveInFlight) return;                   /* generation loop picks it up */
     saveInFlight = (async () => {
       try {
+        await Promise.resolve(); // combine synchronous edits before the first native write
         let written = -1;
         while (written !== S.generation) {
           const generation = S.generation;
           await persistOnce();
           written = generation;
         }
+      } catch (err) {
+        S.note = String(err?.message ?? err);
+        setState(`⚠ NOT SAVED: ${S.note}`, "err");
       } finally { saveInFlight = null; }
     })();
   }
@@ -1767,25 +3220,23 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   async function persistOnce() {
-    const body = serialise();
-    if (body.length > LIMITS.BODY) {
-      S.note = "picks region exceeds 512 KiB — remove some rules";
-      setState(`⚠ NOT SAVED: ${S.note}`, "err");
-      return;
-    }
     setState("saving…", "");
     for (let attempt = 0; attempt < 3; attempt++) {
-      const reply = await send({ type: "splice", region: "picks", body: serialise(), base_rev: S.rev });
+      const writtenRules = S.rules;
+      const body = serialise();
+      if (new TextEncoder().encode(body).length > LIMITS.BODY) {
+        throw new Error("picks region exceeds 512 KiB — remove some rules");
+      }
+      const reply = await send({ type: "splice", region: "picks", body, base_rev: S.rev });
       if (reply?.ok) {
+        diskRules = writtenRules;
         S.rev = reply.rev ?? 0;
         S.note = "";
         flash(`✓ saved ${String(reply.path ?? "").split("/").pop()}`);
         return;
       }
       if (!reply?.conflict) {
-        S.note = reply?.error ?? "no reply";
-        setState(`⚠ NOT SAVED: ${S.note}`, "err");
-        return;
+        throw new Error(reply?.error ?? "no reply");
       }
       /* Someone else wrote the file: adopt their rules, keep ours, retry. */
       const fresh = await send({ type: "read" });
@@ -1793,17 +3244,17 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
         S.rev = fresh.rev ?? 0;
         mergeForeign(fresh.picks);
         renderLive(); refreshBar(); refreshDrawer(); refreshPanel();
-      }
-      await sleep(40 + Math.random() * 120 * (attempt + 1));
+      } else throw new Error(fresh?.error ?? "cannot refresh after a save conflict");
+      if (attempt < 2) await sleep(40 + Math.random() * 120 * (attempt + 1));
     }
-    S.note = "the file keeps changing on disk";
-    setState(`⚠ NOT SAVED: ${S.note} — press ⟲`, "err");
+    throw new Error("the file keeps changing on disk — press ⟲");
   }
 
   async function hydrate(force = false) {
     if (S.hydrated && !force) return true;
     const reply = await send({ type: "read" });
     if (!reply?.ok) {
+      S.hydrated = false;
       S.note = reply?.error ?? "cannot reach the native host";
       return false;
     }
@@ -1812,50 +3263,83 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     S.rev = reply.rev ?? 0;
     S.warnings = reply.warnings ?? [];
     S.rules = Object.freeze(parseLines(reply.picks));
+    diskRules = S.rules;
     return true;
   }
 
   /* Re-read disk and re-apply anything we have locally that disk lacks. */
   async function recover(manual = false) {
-    await saveInFlight?.catch(() => {});
-    const local = S.rules;
-    const before = serialise();
-    if (!await hydrate(true)) { baseState(); return false; }
-    const merged = S.rules.slice();
-    for (const r of local) {
-      const i = merged.findIndex((x) => x.key === r.key);
-      if (i >= 0) merged[i] = r; else merged.push(r);
+    let reply;
+    for (;;) {
+      await saveInFlight?.catch(() => {});
+      const rev = S.rev;
+      reply = await send({ type: "read" });
+      // A save or another resync can complete while this snapshot travels
+      // back. Merge only against the disk baseline that produced the read.
+      if (!saveInFlight && S.rev === rev) break;
     }
-    S.rules = Object.freeze(merged);
+    if (!reply?.ok) {
+      S.hydrated = false;
+      S.note = reply?.error ?? "cannot reach the native host";
+      baseState();
+      return false;
+    }
+    S.hydrated = true;
+    S.note = "";
+    S.rev = reply.rev ?? 0;
+    mergeForeign(reply.picks);
+    if (manual) await loadPalette();
+    const diskText = diskRules.map((r) => `    ${ruleLine(r)}`).join("\n");
     renderLive(); refreshBar(); refreshDrawer(); refreshPanel();
-    if (serialise() !== before) { S.generation++; schedulePersist(); }
+    if (manual) { pickGrid?.refreshAvailability(); editGrid?.refreshAvailability(); }
+    if (serialise() !== diskText) { S.generation++; schedulePersist(); }
     if (manual) flash("⟲ resynced with disk");
     return true;
   }
 
-  /* Disk changed under us (popup saved / deleted): disk wins. */
-  async function rehydrate() {
-    await saveInFlight?.catch(() => {});
-    const before = S.rules;
-    const beforeText = serialise();
-    if (!await hydrate(true)) { baseState(); return; }
-    if (serialise() !== beforeText) S.undo.push(before);
-    renderLive(); refreshBar(); refreshDrawer(); refreshPanel();
-    flash("↻ reloaded from disk");
+  /* Adopt disk changes while preserving any edits still awaiting a commit. */
+  let rehydratePending = false, rehydrateInFlight = null;
+  function rehydrate() {
+    rehydratePending = true;
+    if (rehydrateInFlight) return rehydrateInFlight;
+    rehydrateInFlight = (async () => {
+      // Coalesce synchronous notifications and request one fresh snapshot if
+      // more arrive during a read. Concurrent reads otherwise amplify retries.
+      await Promise.resolve();
+      while (rehydratePending) {
+        rehydratePending = false;
+        const before = S.rules;
+        const beforeText = serialise();
+        if (!await recover()) return;
+        if (serialise() !== beforeText) {
+          S.undo.push(before);
+          if (S.undo.length > 100) S.undo.shift();
+          S.redo = [];
+          refreshBar();
+        }
+        flash("↻ reloaded from disk");
+      }
+    })().finally(() => { rehydrateInFlight = null; });
+    return rehydrateInFlight;
   }
 
   /* ══ Targeting ══════════════════════════════════════════════════════ */
-  function setStack(elm) {
+  function setStack(elm, refresh = true) {
     const chain = [];
     for (let n = elm; n?.nodeType === 1; n = n.parentElement) chain.push(n);
     S.stack = chain;
     S.depth = 0;
-    retarget();
+    if (refresh) retarget();
   }
   function retarget() {
+    Preview.clear();
     drawMask();
     refreshBar();
     if (panelKind === "pick") {
+      dropIndex();
+      resetVarSelection();
+      S.pickStep = "target";
+      S.selectors = candidates(target());
       S.elementVars = getElementVars(target());
       q("pvarbtn").disabled = S.elementVars.length === 0;
       if (!S.elementVars.length) S.targetMode = "selector";
@@ -1898,7 +3382,7 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
     }
     if (panelKind === "edit") closePanel();
     S.locked = false;
-    setStack(e.target);
+    setStack(e.target, false);
     openPick();
   }
 
@@ -1924,21 +3408,33 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
   const LISTENERS = [["mouseover", onOver], ["pointerdown", onPointerDown], ["click", onClick], ["keydown", onKey]];
   let listenerCtl = null;
 
-  async function setActive(on) {
+  let activation = Promise.resolve();
+  function setActive(on) {
+    const job = activation.then(() => changeActive(on ?? !S.active));
+    activation = job.catch(() => {});
+    return job;
+  }
+
+  async function changeActive(on) {
     if (on === S.active) return;
     S.active = on;
     if (on) {
+      clearAudit();
       dropIndex();
-      await hydrate(true);
+      await saveInFlight;
+      if (S.note) await recover();
+      else await hydrate(true);
+      S.undo = []; S.redo = [];
       document.documentElement.append(hostEl);
       buildBar();
+      await loadPalette();
       renderLive();
       listenerCtl = new AbortController();
       const { signal } = listenerCtl;
       const opts = { capture: true, signal };
       for (const [type, fn] of LISTENERS) window.addEventListener(type, fn, opts);
       window.addEventListener("scroll", scheduleMask, { capture: true, passive: true, signal });
-      window.addEventListener("resize", scheduleMask, { passive: true, signal });
+      window.addEventListener("resize", () => { positionDialog(); scheduleMask(); }, { passive: true, signal });
       /* SPA route changes leave the stack pointing at detached nodes. */
       globalThis.navigation?.addEventListener("navigate", () => {
         S.stack = []; S.depth = 0; dropIndex(); closePanel();
@@ -1956,8 +3452,8 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
       dropIndex();
       hostEl.remove();
       dropProbe();
-      await saveInFlight?.catch(() => {});
       detachSheet();
+      await saveInFlight?.catch(() => {});
     }
   }
 
@@ -1969,15 +3465,27 @@ button,input,select,textarea{font:inherit;color:inherit;background:none;border:0
       case "scan":
         try { return Promise.resolve(scan()); }
         catch (e) { return Promise.resolve({ ok: false, error: `Scan failed: ${e?.message ?? e}` }); }
+      case "dumpVariables":
+        try { return Promise.resolve(dumpVariables()); }
+        catch (e) { return Promise.resolve({ ok: false, error: `Variable dump failed: ${e?.message ?? e}` }); }
+      case "dumpVariablesChunk":
+        try { return Promise.resolve(dumpVariablesChunk(msg)); }
+        catch (e) { return Promise.resolve({ ok: false, error: `Variable dump failed: ${e?.message ?? e}` }); }
+      case "audit":
+        try { return Promise.resolve(audit(msg)); }
+        catch (e) { return Promise.resolve({ ok: false, error: `Audit failed: ${e?.message ?? e}` }); }
+      case "auditClear":
+        clearAudit();
+        return Promise.resolve({ ok: true });
       case "picker":
-        return setActive(msg.enable ?? !S.active).then(() => ({ ok: true, active: S.active }));
+        return setActive(msg.enable).then(() => ({ ok: true, active: S.active }));
       case "reset":
         S.rules = Object.freeze([]); S.undo = []; S.redo = [];
-        S.hydrated = true; S.note = ""; S.rev = 0;
+        S.hydrated = false; S.note = ""; S.rev = 0; diskRules = S.rules;
         renderLive(); refreshBar(); refreshDrawer(); refreshPanel(); baseState();
         return Promise.resolve({ ok: true });
       case "rehydrate":
-        if (!S.active) { S.hydrated = false; return Promise.resolve({ ok: true, active: false }); }
+        if (!S.active) return Promise.resolve({ ok: true, active: false });
         return rehydrate().then(() => ({ ok: true, rules: S.rules.length }));
       default:
         return false;

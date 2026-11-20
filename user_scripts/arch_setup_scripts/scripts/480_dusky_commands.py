@@ -96,18 +96,14 @@ SETUP_COMMANDS: list[FleetCommand] = [
     FleetCommand(Mode.USER, 'mkdir -p "$HOME/Documents/dusky_backups/"', "Create Backups Directory"),
     FleetCommand(
         Mode.USER,
-        'TARGET="$HOME/user_scripts/dusky_system/click_away_to_dismiss" && '
-        'wayland-scanner client-header "$TARGET/hyprland-focus-grab-v1.xml" "$TARGET/hyprland-focus-grab-v1-client-protocol.h" && '
-        'wayland-scanner private-code "$TARGET/hyprland-focus-grab-v1.xml" "$TARGET/hyprland-focus-grab-v1-client-protocol.c" && '
-        'gcc -shared -fPIC -o "$TARGET/libwaylandgrab.so" "$TARGET/dusky.c" "$TARGET/hyprland-focus-grab-v1-client-protocol.c" -lwayland-client -lpthread -ldl',
+        'TARGET="$HOME/user_scripts/dusky/click_away_to_dismiss" && '
+        'wayland-scanner client-header "$TARGET/hyprland_focus_grab_v1.xml" "$TARGET/hyprland_focus_grab_v1_client_protocol.h" && '
+        'wayland-scanner private-code "$TARGET/hyprland_focus_grab_v1.xml" "$TARGET/hyprland_focus_grab_v1_client_protocol.c" && '
+        'gcc -shared -fPIC -o "$TARGET/libwaylandgrab.so" "$TARGET/dusky.c" "$TARGET/hyprland_focus_grab_v1_client_protocol.c" -lwayland-client -lpthread -ldl',
         "Compile Wayland Click-Away Shared Library"
     ),
-    FleetCommand(Mode.USER, 'systemctl --user daemon-reload && systemctl --user restart dusky_quickpanal.service || true', "Reload & Restart Quickpanel Service"),
-    FleetCommand(Mode.USER, '"$HOME/user_scripts/dusky_system/reload_cc/cc_restart.sh" --quiet >/dev/null 2>&1 < /dev/null &', "Background Restart Control Center"),
-    FleetCommand(Mode.USER, '"$HOME/user_scripts/dusky_system/quickpanals/reload_quickpanal.sh/" --quiet >/dev/null 2>&1 < /dev/null &', "Background Reload Quickpanel"),
     FleetCommand(Mode.USER, 'update-desktop-database "$HOME/.local/share/applications" || true', "Update Desktop Entry Database Cache"),
     # --- System Services ---
-    # FleetCommand(Mode.USER, 'systemctl --user disable dusky.service || true', "Disable Legacy Dusky Service"),
     # FleetCommand(Mode.SUDO, 'systemctl enable --now tlp.service || true', "Enable TLP Power Management Service"),
 ]
 
@@ -122,6 +118,7 @@ BEFORE_COMMANDS: list[FleetCommand] = [
     FleetCommand(Mode.USER, 'mkdir -p ~/.config/opencode/themes || true', "Create Opencode Themes Directory"),
     FleetCommand(Mode.USER, 'mkdir -p ~/.config/Kvantum/matugen || true', "Create Kvantum Matugen Directory"),
     FleetCommand(Mode.USER, 'systemctl --user disable --now dusky_sliders.service || true', "Disable Legacy Sliders Service"),
+    FleetCommand(Mode.USER, 'systemctl --user disable --now dusky.service || true', "Disable Legacy Dusky Service"),
     # --- Remove old dusky_snapshot units before re-deployment ---
     FleetCommand(
         Mode.SUDO,
@@ -132,7 +129,6 @@ BEFORE_COMMANDS: list[FleetCommand] = [
     FleetCommand(Mode.SUDO, 'rm -f /etc/systemd/system/dusky_snapshot.service /etc/systemd/system/dusky_snapshot.timer', "Remove Snapshot Unit Files"),
     FleetCommand(Mode.SUDO, 'systemctl daemon-reload', "Systemd System Daemon Reload"),
     # --- System Services ---
-    # FleetCommand(Mode.USER, 'systemctl --user disable dusky.service || true', "Disable Legacy Dusky Service"),
     # FleetCommand(Mode.SUDO, 'systemctl enable --now tlp.service || true', "Enable TLP Power Management Service"),
 ]
 
@@ -151,16 +147,14 @@ AFTER_COMMANDS: list[FleetCommand] = [
     FleetCommand(Mode.SUDO, 'systemctl enable --now ufw.service || true', "Enable & Start UFW Firewall Service"),
     FleetCommand(
         Mode.USER,
-        'TARGET="$HOME/user_scripts/dusky_system/click_away_to_dismiss" && '
-        'wayland-scanner client-header "$TARGET/hyprland-focus-grab-v1.xml" "$TARGET/hyprland-focus-grab-v1-client-protocol.h" && '
-        'wayland-scanner private-code "$TARGET/hyprland-focus-grab-v1.xml" "$TARGET/hyprland-focus-grab-v1-client-protocol.c" && '
-        'gcc -shared -fPIC -o "$TARGET/libwaylandgrab.so" "$TARGET/dusky.c" "$TARGET/hyprland-focus-grab-v1-client-protocol.c" -lwayland-client -lpthread -ldl',
+        'TARGET="$HOME/user_scripts/dusky/click_away_to_dismiss" && '
+        'wayland-scanner client-header "$TARGET/hyprland_focus_grab_v1.xml" "$TARGET/hyprland_focus_grab_v1_client_protocol.h" && '
+        'wayland-scanner private-code "$TARGET/hyprland_focus_grab_v1.xml" "$TARGET/hyprland_focus_grab_v1_client_protocol.c" && '
+        'gcc -shared -fPIC -o "$TARGET/libwaylandgrab.so" "$TARGET/dusky.c" "$TARGET/hyprland_focus_grab_v1_client_protocol.c" -lwayland-client -lpthread -ldl',
         "Recompile Wayland Click-Away Shared Library"
     ),
-    FleetCommand(Mode.USER, 'systemctl --user enable --now dusky_quickpanal.service || true', "Enable & Start Dusky Quickpanel Service"),
     FleetCommand(Mode.USER, 'systemctl --user daemon-reload || true', "Reload Systemd User Daemon"),
-    FleetCommand(Mode.USER, 'systemctl --user restart dusky_quickpanal.service || true', "Restart Dusky Quickpanel Service"),
-    FleetCommand(Mode.USER, 'systemctl --user restart osd_lock.service || true', "Restart OSD Lock Service"),
+    FleetCommand(Mode.USER, 'systemctl --user try-restart osd_lock.service || true', "Restart Running OSD Lock Service"),
     FleetCommand(Mode.USER, 'update-desktop-database "$HOME/.local/share/applications" || true', "Update Desktop Entry Database Cache"),
 ]
 

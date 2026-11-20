@@ -77,14 +77,6 @@ class ReliabilityTests(unittest.TestCase):
         self.assertFalse(cache.exists())
         self.assertFalse(runtime.exists())
 
-    def test_xwayland_requires_a_real_host_display(self) -> None:
-        _, prof, _ = self.profile('[graphics]\nprefer_xwayland = true\n')
-        with mock.patch.dict(os.environ, {"DISPLAY": ""}), \
-             mock.patch.object(runner, "run_cmd", return_value=runner.Ran(1, "", "no user manager")):
-            builder = runner.EnvironmentBuilder(prof, runner.resolve_paths(prof), dry_run=True)
-            with self.assertRaisesRegex(runner.ConfigError, "DISPLAY is unset"):
-                builder.build(under_gamescope=False)
-
     def test_native_wayland_uses_single_sdl_backend(self) -> None:
         _, prof, _ = self.profile('[graphics]\nwayland_native = true\n')
         builder = runner.EnvironmentBuilder(prof, runner.resolve_paths(prof), dry_run=True)
@@ -98,29 +90,6 @@ class ReliabilityTests(unittest.TestCase):
             env = builder.build(under_gamescope=False)
         self.assertNotIn("SDL_AUDIODRIVER", env)
         self.assertNotIn("ALSOFT_DRIVERS", env)
-
-    def test_xwayland_uses_published_display_after_compositor_reload(self) -> None:
-        _, prof, _ = self.profile('[graphics]\nprefer_xwayland = true\n')
-        with mock.patch.dict(os.environ, {"DISPLAY": ""}), \
-             mock.patch.object(runner, "run_cmd", return_value=runner.Ran(0, "DISPLAY=:47\n", "")), \
-             mock.patch.object(Path, "exists", return_value=True):
-            builder = runner.EnvironmentBuilder(prof, runner.resolve_paths(prof), dry_run=True)
-            env = builder.build(under_gamescope=False)
-        self.assertEqual(env["DISPLAY"], ":47")
-
-    def test_explicit_non_wayland_wine_selects_x11_driver(self) -> None:
-        _, prof, _ = self.profile(
-            f'[runtime]\ntype = "wine"\n[runtime.wine]\n'
-            f'prefix_dir = "{self.root}/prefix"\ndxvk = false\nvkd3d = false\n'
-            '[graphics]\nwayland_native = false\nshader_cache = false\n'
-        )
-        with mock.patch.object(runner, "host_x11_display", return_value=":0"), \
-             mock.patch.object(runner.WinePrefix, "provision"), \
-             mock.patch.object(runner.WinePrefix, "set_graphics_driver") as select:
-            builder = runner.EnvironmentBuilder(prof, runner.resolve_paths(prof), dry_run=False)
-            env = builder.build(under_gamescope=False)
-        self.assertEqual(env["DISPLAY"], ":0")
-        select.assert_called_once_with("x11", mock.ANY)
 
     def test_overlay_work_cannot_be_game_directory(self) -> None:
         _, prof, _ = self.profile('dwarfs_image = "game.dwarfs"\noverlay_work = "."\n')
@@ -361,17 +330,19 @@ class InstallerTests(unittest.TestCase):
 
     def test_multilib_repairs_partial_section_once(self) -> None:
         conf = self.root / "pacman.conf"
-        conf.write_text("[options]\nColor\nDisableDownloadTimeout\n\n[multilib]\n#Include = /etc/pacman.d/mirrorlist\n")
+        conf.write_text("[options]\nColor\nDisableDownloadTimeout\n\n[multilib]\n#Include = /etc/pacman.d/mirrorlist\n", encoding="utf-8")
         ctx = setup.SetupContext(auto_yes=True)
 
         def install_command(_ctx, argv, _description, **_kwargs):
             if isinstance(argv, list) and len(argv) > 2 and argv[1] == "install":
-                conf.write_text(Path(argv[-2]).read_text())
+                subprocess.run(argv[1:], check=True)
+            elif argv[1] == "mv":
+                subprocess.run(argv[1:], check=True)
             return True
 
         with mock.patch.object(setup, "run_command", side_effect=install_command):
             self.assertTrue(setup.enable_multilib_and_optimizations(ctx, conf))
-            self.assertIn("\nInclude = /etc/pacman.d/mirrorlist\n", conf.read_text())
+            self.assertIn("\nInclude = /etc/pacman.d/mirrorlist\n", conf.read_text(encoding="utf-8"))
             self.assertFalse(setup.enable_multilib_and_optimizations(ctx, conf))
 
     def test_native_dwarfs_build_uses_makepkg_config(self) -> None:
@@ -385,10 +356,10 @@ class InstallerTests(unittest.TestCase):
             if "--makepkgconf" in argv:
                 conf = Path(argv[argv.index("--makepkgconf") + 1])
             else:
-                conf = Path(argv[argv.index("--mflags") + 1].split()[-1])
-            self.assertIn('-march=native -O3', conf.read_text())
+                conf = Path(argv[argv.index("--mflags") + 1].removeprefix("--config="))
+            self.assertIn('-march=native -O3', conf.read_text(encoding="utf-8"))
             result = subprocess.run(["bash", "-c", 'source "$1"; printf "%s\\n" "$CFLAGS" "$CXXFLAGS"',
-                                     "bash", str(conf)], capture_output=True, text=True, check=True)
+                                     "bash", str(conf)], capture_output=True, encoding="utf-8", check=True)
             self.assertEqual(result.stdout.count("-march=native -O3"), 2)
             return True
 

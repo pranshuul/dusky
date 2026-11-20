@@ -1,0 +1,1356 @@
+#!/usr/bin/env python3
+# Dusky Polkit - a minimal, high-performance polkit authentication agent.
+#
+# Speaks the D-Bus wire protocol directly over AF_UNIX (no external dbus libraries).
+# Uses Linux pidfd and selectors for zero-latency child terminal lifecycle management.
+#
+# Optimized for modern Arch Linux (Wayland / Hyprland).
+
+lazy import ctypes
+import gc
+lazy import getpass
+lazy import json
+lazy import shlex
+lazy import traceback
+import os
+lazy import pwd
+import select
+import selectors
+import signal
+import socket
+import struct
+lazy import subprocess
+import sys
+lazy import termios
+import time
+lazy import tty
+from collections import deque
+
+BUS_NAME = "org.freedesktop.PolicyKit1"
+AUTHORITY_PATH = "/org/freedesktop/PolicyKit1/Authority"
+AUTHORITY_IFACE = "org.freedesktop.PolicyKit1.Authority"
+AGENT_IFACE = "org.freedesktop.PolicyKit1.AuthenticationAgent"
+OBJ_PATH = "/org/dusky/PolicyKit1/AuthenticationAgent"
+HELPER_SOCKET = "/run/polkit/agent-helper.socket"
+LOGIND_NAME = "org.freedesktop.login1"
+LOGIND_PATH = "/org/freedesktop/login1"
+LOGIND_MGR = "org.freedesktop.login1.Manager"
+
+MAX_ATTEMPTS = 3
+AUTH_TIMEOUT = 120.0
+HBUF_CAP = 65536        # helper protocol lines must stay sane
+PWBUF_CAP = 510         # helper fgets(512): response + newline + terminating NUL
+MAX_MESSAGE_SIZE = 128 * 1024 * 1024  # D-Bus wire limit
+
+BUS_NAME_WATCH_RULE = (
+    "type='signal',sender='org.freedesktop.DBus',"
+    "interface='org.freedesktop.DBus',member='NameOwnerChanged',"
+    "arg0='" + BUS_NAME + "'"
+)
+BENIGN_ERRORS = frozenset({
+    "org.freedesktop.DBus.Error.UnknownMethod",
+    "org.freedesktop.DBus.Error.UnknownDestName",
+    "org.freedesktop.DBus.Error.UnknownObject",
+    "org.freedesktop.DBus.Error.ServiceUnknown",
+})
+
+INTROSPECT_XML = (
+    '<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN" '
+    '"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">\n'
+    '<node>\n'
+    '  <interface name="org.freedesktop.DBus.Introspectable">\n'
+    '    <method name="Introspect">\n'
+    '      <arg name="xml_data" type="s" direction="out"/>\n'
+    '    </method>\n'
+    '  </interface>\n'
+    '  <interface name="org.freedesktop.DBus.Peer">\n'
+    '    <method name="Ping"/>\n'
+    '    <method name="GetMachineId">\n'
+    '      <arg name="machine_uuid" type="s" direction="out"/>\n'
+    '    </method>\n'
+    '  </interface>\n'
+    '  <interface name="org.freedesktop.PolicyKit1.AuthenticationAgent">\n'
+    '    <method name="BeginAuthentication">\n'
+    '      <arg name="action_id" type="s" direction="in"/>\n'
+    '      <arg name="message" type="s" direction="in"/>\n'
+    '      <arg name="icon_name" type="s" direction="in"/>\n'
+    '      <arg name="details" type="a{ss}" direction="in"/>\n'
+    '      <arg name="cookie" type="s" direction="in"/>\n'
+    '      <arg name="identities" type="a(sa{sv})" direction="in"/>\n'
+    '    </method>\n'
+    '    <method name="CancelAuthentication">\n'
+    '      <arg name="cookie" type="s" direction="in"/>\n'
+    '    </method>\n'
+    '  </interface>\n'
+    '</node>\n'
+)
+
+
+ALIGN = frozendict({
+    "y": 1, "b": 4, "n": 2, "q": 2, "i": 4, "u": 4,
+    "x": 8, "t": 8, "d": 8, "s": 4, "o": 4, "g": 1,
+    "a": 4, "(": 8, "{": 8, "v": 1, "h": 4,
+})
+
+
+class BusError(Exception):
+    pass
+
+
+def log(msg: str) -> None:
+    print(f"[dusky_polkit] {msg}", file=sys.stderr, flush=True)
+
+
+def bus_address(address: str) -> str:
+    """Select the first supported Unix transport and decode D-Bus percent escapes."""
+    for entry in address.split(";"):
+        transport, _, options = entry.partition(":")
+        if transport != "unix":
+            continue
+        attrs = dict(item.split("=", 1) for item in options.split(",") if "=" in item)
+        for name in ("path", "abstract"):
+            if name not in attrs:
+                continue
+            value = attrs[name]
+            out = bytearray()
+            i = 0
+            while i < len(value):
+                if value[i] == "%":
+                    out.append(int(value[i + 1:i + 3], 16))
+                    i += 3
+                else:
+                    out.extend(value[i].encode())
+                    i += 1
+            decoded = os.fsdecode(out.take_bytes())
+            return "\0" + decoded if name == "abstract" else decoded
+    raise BusError("no supported Unix transport in system bus address")
+
+
+def unescape_helper(raw: bytes) -> str:
+    """Decode GLib g_strescape output without corrupting octal-escaped UTF-8."""
+    out = bytearray()
+    escapes = {ord("n"): 10, ord("r"): 13, ord("t"): 9, ord("b"): 8,
+               ord("f"): 12, ord("v"): 11}
+    i = 0
+    while i < len(raw):
+        c = raw[i]
+        i += 1
+        if c == 92:
+            if i == len(raw):
+                raise ValueError("incomplete helper escape")
+            c = raw[i]
+            i += 1
+            if 48 <= c <= 55:
+                digits = bytes([c])
+                while i < len(raw) and len(digits) < 3 and 48 <= raw[i] <= 55:
+                    digits += bytes([raw[i]])
+                    i += 1
+                c = int(digits, 8)
+            else:
+                c = escapes.get(c, c)
+        out.append(c)
+    return out.take_bytes().decode("utf-8", "replace")
+
+
+_libc = None
+
+
+def trim_memory() -> None:
+    """Collect Python garbage and release glibc free arenas back to the OS."""
+    global _libc
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    try:
+        if _libc is None:
+            _libc = ctypes.CDLL("libc.so.6")
+            _libc.malloc_trim.argtypes = (ctypes.c_size_t,)
+            _libc.malloc_trim.restype = ctypes.c_int
+        _libc.malloc_trim(0)
+    except Exception:
+        pass
+
+
+def _read_type(sig: str, i: int) -> tuple[object, int]:
+    if i >= len(sig):
+        raise BusError("incomplete signature")
+    c = sig[i]
+    if c == "a":
+        elem, nxt = _read_type(sig, i + 1)
+        return ["a", elem], nxt
+    if c in "({":
+        node: list = [c]
+        closer = ")" if c == "(" else "}"
+        i += 1
+        while i < len(sig) and sig[i] != closer:
+            child, i = _read_type(sig, i)
+            node.append(child)
+        if i >= len(sig) or len(node) == 1:
+            raise BusError("invalid container signature")
+        return node, i + 1
+    if c not in ALIGN or c in "a({":
+        raise BusError(f"invalid signature type {c!r}")
+    return c, i + 1
+
+
+def parse_sig(sig: str) -> list:
+    """Signature string -> nested token tree. Leaves are bare chars;
+    arrays are ['a', element]; structs/dicts carry '(' or '{' first."""
+    out: list = []
+    i = 0
+    while i < len(sig):
+        token, i = _read_type(sig, i)
+        out.append(token)
+    return out
+
+
+def first_char(node) -> str:
+    return node[0] if isinstance(node, list) else node
+
+
+class Writer:
+    """Marshals python values into D-Bus wire bytes (little endian)."""
+
+    __slots__ = ("buf",)
+
+    def __init__(self) -> None:
+        self.buf = bytearray()
+
+    def pad(self, n: int) -> None:
+        self.buf += b"\0" * ((-len(self.buf)) % n)
+
+    def put(self, node, v) -> None:
+        if isinstance(node, list):
+            kind = node[0]
+            if kind == "a":
+                elem = node[1]
+                self.pad(4)
+                len_pos = len(self.buf)
+                self.buf += b"\0\0\0\0"
+                self.pad(ALIGN[first_char(elem)])
+                if v:
+                    start = len(self.buf)
+                    if isinstance(v, dict):
+                        for k, val in v.items():
+                            self.put(elem, [k, val])
+                    else:
+                        for item in v:
+                            self.put(elem, item)
+                    struct.pack_into("<I", self.buf, len_pos, len(self.buf) - start)
+            elif kind == "(":
+                self.pad(8)
+                for sub, item in zip(node[1:], v, strict=True):
+                    self.put(sub, item)
+            elif kind == "{":
+                self.pad(8)
+                self.put(node[1], v[0])
+                self.put(node[2], v[1])
+            return
+
+        c = node
+        self.pad(ALIGN[c])
+        if c == "y":
+            self.buf.append(v)
+        elif c == "b":
+            self.buf += struct.pack("<I", 1 if v else 0)
+        elif c == "n":
+            self.buf += struct.pack("<h", v)
+        elif c == "q":
+            self.buf += struct.pack("<H", v)
+        elif c in "uh":
+            self.buf += struct.pack("<I", v)
+        elif c == "i":
+            self.buf += struct.pack("<i", v)
+        elif c == "x":
+            self.buf += struct.pack("<q", v)
+        elif c == "t":
+            self.buf += struct.pack("<Q", v)
+        elif c == "d":
+            self.buf += struct.pack("<d", v)
+        elif c in "so":
+            raw = v.encode() if isinstance(v, str) else v
+            self.buf += struct.pack("<I", len(raw))
+            self.buf += raw + b"\0"
+        elif c == "g":
+            raw = v.encode() if isinstance(v, str) else v
+            self.buf.append(len(raw))
+            self.buf += raw + b"\0"
+        elif c == "v":
+            sig, inner = v
+            self.put("g", sig)
+            self.put(parse_sig(sig)[0], inner)
+        else:
+            raise BusError(f"cannot marshal {c!r}")
+
+
+class Reader:
+    """Demarshals wire bytes relative to position 0 (body/header slices)."""
+
+    __slots__ = ("b", "p", "endian")
+
+    def __init__(self, data: bytes, endian: str = "<") -> None:
+        self.b = data
+        self.p = 0
+        self.endian = endian
+
+    def align(self, n: int) -> None:
+        self.p += (-self.p) % n
+
+    def take(self, n: int) -> bytes:
+        if self.p + n > len(self.b):
+            raise BusError("truncated message")
+        out = self.b[self.p:self.p + n]
+        self.p += n
+        return out
+
+    def u32(self) -> int:
+        self.align(4)
+        return struct.unpack(self.endian + "I", self.take(4))[0]
+
+    def _string(self) -> str:
+        ln = self.u32()
+        raw = self.take(ln)
+        if self.take(1) != b"\0":
+            raise BusError("unterminated string")
+        return raw.decode("utf-8")
+
+    def _gstr(self) -> str:
+        ln = self.take(1)[0]
+        raw = self.take(ln)
+        if self.take(1) != b"\0":
+            raise BusError("unterminated signature")
+        return raw.decode("ascii")
+
+    def value(self, node):
+        if isinstance(node, list):
+            kind = node[0]
+            if kind == "a":
+                elem = node[1]
+                self.align(4)
+                ln = self.u32()
+                self.align(ALIGN[first_char(elem)])
+                end = self.p + ln
+                if end > len(self.b):
+                    raise BusError("truncated array")
+                out = []
+                while self.p < end:
+                    out.append(self.value(elem))
+                if self.p != end:
+                    raise BusError("array length mismatch")
+                return out
+            if kind == "(":
+                self.align(8)
+                return tuple(self.value(c) for c in node[1:])
+            if kind == "{":
+                self.align(8)
+                return [self.value(node[1]), self.value(node[2])]
+        c = node
+        self.align(ALIGN[c])
+        if c == "y":
+            return self.take(1)[0]
+        if c == "b":
+            return bool(struct.unpack(self.endian + "I", self.take(4))[0])
+        if c == "n":
+            return struct.unpack(self.endian + "h", self.take(2))[0]
+        if c == "q":
+            return struct.unpack(self.endian + "H", self.take(2))[0]
+        if c == "i":
+            return struct.unpack(self.endian + "i", self.take(4))[0]
+        if c in "uh":
+            return struct.unpack(self.endian + "I", self.take(4))[0]
+        if c == "x":
+            return struct.unpack(self.endian + "q", self.take(8))[0]
+        if c == "t":
+            return struct.unpack(self.endian + "Q", self.take(8))[0]
+        if c == "d":
+            return struct.unpack(self.endian + "d", self.take(8))[0]
+        if c in "so":
+            return self._string()
+        if c == "g":
+            return self._gstr()
+        if c == "v":
+            sig = self._gstr()
+            return (sig, self.value(parse_sig(sig)[0]))
+        raise BusError(f"cannot demarshal {c!r}")
+
+
+def build_message(mtype: int, flags: int, serial: int,
+                  fields: list[tuple[int, str, object]],
+                  body_sig: str = "", body_args=()) -> bytes:
+    body = Writer()
+    if body_sig:
+        for node, val in zip(parse_sig(body_sig), body_args, strict=True):
+            body.put(node, val)
+
+    hf = Writer()
+    for code, kind, val in fields:
+        hf.pad(8)
+        hf.buf.append(code)
+        hf.put("g", kind)
+        if kind in "uh":
+            hf.put("u", val)
+        else:
+            hf.put(kind, val)  # s / o / g
+
+    head = bytearray(b"l")
+    head += bytes((mtype, flags, 1))
+    head += struct.pack("<III", len(body.buf), serial, len(hf.buf))
+    head += hf.buf
+    head += b"\0" * ((-len(head)) % 8)
+    head.extend(body.buf)
+    return head.take_bytes()
+
+
+def parse_message(buf: bytes) -> tuple[dict, int] | tuple[None, int]:
+    if len(buf) < 16:
+        return None, 0
+    if buf[0] not in (ord("l"), ord("B")) or buf[3] != 1:
+        raise BusError("invalid D-Bus byte order or protocol version")
+    endian = "<" if buf[0] == ord("l") else ">"
+    body_len, serial, hlen = struct.unpack_from(endian + "III", buf, 4)
+    hdr_end = 16 + hlen
+    body_start = (hdr_end + 7) & ~7
+    total = body_start + body_len
+    if total > MAX_MESSAGE_SIZE:
+        raise BusError("D-Bus message exceeds wire limit")
+    if len(buf) < total:
+        return None, 0
+
+    try:
+        hr = Reader(buf[16:hdr_end], endian)
+        fields: dict[int, object] = {}
+        while hr.p < hlen:
+            hr.align(8)
+            code = hr.take(1)[0]
+            sig = hr._gstr()
+            fields[code] = hr.value(parse_sig(sig)[0])
+
+        vals = ()
+        sig = fields.get(8)
+        if body_len and sig:
+            br = Reader(buf[body_start:total], endian)
+            vals = tuple(br.value(node) for node in parse_sig(sig))
+            if br.p != body_len:
+                raise BusError("body length mismatch")
+
+        msg = {"type": buf[1], "flags": buf[2], "serial": serial,
+               "fields": fields, "sig": sig, "body": vals}
+        return msg, total
+    except Exception as e:
+        log(f"warning: failed to decode D-Bus message serial={serial}: {e}")
+        return None, total
+
+
+class Agent:
+    def __init__(self) -> None:
+        self.sel = selectors.DefaultSelector()
+        self.sock: socket.socket | None = None
+        self.rbuf = b""
+        self.serial = 0
+        self.stopping = False
+        self.session_id: str = ""
+        self.current: dict | None = None
+        self.queue: deque[dict] = deque()
+        self.deferred: list[dict] = []
+        self.authority_owner = ""
+        self.wakeup_read, self.wakeup_write = socket.socketpair()
+        self.wakeup_read.setblocking(False)
+        self.wakeup_write.setblocking(False)
+        self.sel.register(self.wakeup_read, selectors.EVENT_READ, "signal")
+
+    # ---------------- bus plumbing ----------------
+
+    def connect_bus(self) -> None:
+        addr = os.environ.get("DBUS_SYSTEM_BUS_ADDRESS",
+                              "unix:path=/run/dbus/system_bus_socket")
+        path = bus_address(addr)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock = s
+        s.settimeout(5.0)
+        s.connect(path)
+        uid_hex = str(os.getuid()).encode().hex()
+        s.sendall(b"\0AUTH EXTERNAL " + uid_hex.encode() + b"\r\nBEGIN\r\n")
+        resp = b""
+        while b"\r\n" not in resp:
+            chunk = s.recv(64)
+            if not chunk:
+                raise BusError("bus closed during SASL")
+            resp += chunk
+        line = resp.split(b"\r\n", 1)[0]
+        if not line.startswith(b"OK "):
+            raise BusError(f"SASL rejected: {line!r}")
+        leftover = resp.split(b"\r\n", 1)[1]
+        s.setblocking(False)
+        self.sock = s
+        self.rbuf = leftover
+        self.sel.register(s, selectors.EVENT_READ, "bus")
+
+        unique = self.sync_call("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                "org.freedesktop.DBus", "Hello", "", (), "s")[0]
+        log(f"connected to system bus as {unique}")
+
+    def sendall_nb(self, sk: socket.socket, data: bytes) -> None:
+        view = memoryview(data)
+        deadline = time.monotonic() + 5.0
+        while view:
+            if self.stopping:
+                raise InterruptedError("agent is stopping")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("send timeout")
+            try:
+                sent = sk.send(view)
+                if sent == 0:
+                    raise ConnectionError("socket closed during send")
+                view = view[sent:]
+            except (BlockingIOError, InterruptedError):
+                readable, _, _ = select.select([self.wakeup_read], [sk], [], remaining)
+                if readable:
+                    self.wakeup_read.recv(4096)
+
+    def send_msg(self, mtype: int, flags: int, fields: list,
+                 body_sig: str = "", body_args=()) -> int:
+        if self.sock is None:
+            return 0
+        self.serial = self.serial % 0xFFFFFFFF + 1
+        data = build_message(mtype, flags, self.serial, fields, body_sig, body_args)
+        self.sendall_nb(self.sock, data)
+        return self.serial
+
+    def call_fields(self, dest: str, path: str, iface: str, member: str,
+                    sig: str) -> list[tuple]:
+        fields = [(1, "o", path), (6, "s", dest), (2, "s", iface), (3, "s", member)]
+        if sig:
+            fields.append((8, "g", sig))
+        return fields
+
+    def sync_call(self, dest: str, path: str, iface: str, member: str,
+                  sig: str, args: tuple, reply_sig: str) -> tuple:
+        if self.stopping:
+            raise InterruptedError("agent is stopping")
+        assert self.sock is not None
+        serial = self.send_msg(1, 0, self.call_fields(dest, path, iface, member, sig),
+                               sig, args)
+        deadline = time.monotonic() + 10.0
+        off = 0
+        while True:
+            if self.stopping:
+                self.rbuf = self.rbuf[off:]
+                raise InterruptedError("agent is stopping")
+            msg, used = parse_message(self.rbuf[off:])
+            if used == 0:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    self.rbuf = self.rbuf[off:]
+                    raise BusError(f"timeout awaiting reply for {member}")
+                r, _, _ = select.select([self.sock, self.wakeup_read], [], [], rem)
+                if self.wakeup_read in r:
+                    self.wakeup_read.recv(4096)
+                if self.stopping or self.sock not in r:
+                    continue
+                try:
+                    chunk = self.sock.recv(65536)
+                except (BlockingIOError, InterruptedError):
+                    continue
+                if not chunk:
+                    raise BusError("bus closed awaiting reply")
+                self.rbuf += chunk
+                continue
+            off += used
+            if msg is None:
+                continue
+            if msg["type"] == 2 and msg["fields"].get(5) == serial:
+                self.rbuf = self.rbuf[off:]
+                if (msg["sig"] or "") != reply_sig:
+                    raise BusError(f"unexpected reply signature for {member}")
+                return msg["body"]
+            if msg["type"] == 3 and msg["fields"].get(5) == serial:
+                err = msg["fields"].get(4, "?")
+                text = msg["body"][0] if msg["body"] else ""
+                self.rbuf = self.rbuf[off:]
+                raise BusError(f"{iface}.{member}: {err}: {text}")
+            # Any other message or signal received during sync_call must be preserved
+            self.deferred.append(msg)
+
+    # ---------------- registration ----------------
+
+    @staticmethod
+    def subject(session_id: str) -> list:
+        return ["unix-session", [["session-id", ("s", session_id)]]]
+
+    def resolve_session(self) -> str:
+        sid = os.environ.get("XDG_SESSION_ID", "").strip()
+        if sid:
+            return sid
+
+        # Tier 2: Try GetSessionByPID for this process
+        try:
+            obj_path = self.sync_call(LOGIND_NAME, LOGIND_PATH, LOGIND_MGR,
+                                      "GetSessionByPID", "u",
+                                      (os.getpid(),), "o")[0]
+            resolved = self.sync_call(LOGIND_NAME, obj_path,
+                                      "org.freedesktop.DBus.Properties", "Get", "ss",
+                                      ("org.freedesktop.login1.Session", "Id"), "v")[0][1]
+            if resolved:
+                return resolved
+        except Exception:
+            pass
+
+        # Tier 3: Query logind User object for active session
+        try:
+            uid = os.getuid()
+            user_obj = self.sync_call(LOGIND_NAME, LOGIND_PATH, LOGIND_MGR,
+                                      "GetUser", "u", (uid,), "o")[0]
+            # Try Display property (so)
+            prop = self.sync_call(LOGIND_NAME, user_obj,
+                                  "org.freedesktop.DBus.Properties",
+                                  "Get", "ss",
+                                  ("org.freedesktop.login1.User", "Display"),
+                                  "v")[0]
+            if prop and isinstance(prop, tuple) and len(prop) > 1:
+                disp_val = prop[1]
+                if isinstance(disp_val, (tuple, list)) and disp_val and disp_val[0]:
+                    return str(disp_val[0])
+
+            # Try Sessions property a(so)
+            prop_sess = self.sync_call(LOGIND_NAME, user_obj,
+                                       "org.freedesktop.DBus.Properties",
+                                       "Get", "ss",
+                                       ("org.freedesktop.login1.User", "Sessions"),
+                                       "v")[0]
+            if prop_sess and isinstance(prop_sess, tuple) and len(prop_sess) > 1:
+                sess_list = prop_sess[1]
+                if isinstance(sess_list, (tuple, list)) and sess_list:
+                    if len(sess_list) == 1:
+                        return str(sess_list[0][0])
+                    raise BusError("multiple sessions without a display session")
+        except Exception as e:
+            log(f"warning: logind user query failed: {e}")
+
+        raise BusError("unable to resolve logind session ID")
+
+    def register(self) -> None:
+        session_id = self.resolve_session()
+        self.session_id = session_id
+        lang = (os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES")
+                or os.environ.get("LANG", "C.UTF-8"))
+        last_err: Exception = BusError("unreachable")
+        for attempt in range(3):
+            try:
+                self.sync_call(BUS_NAME, AUTHORITY_PATH, AUTHORITY_IFACE,
+                               "RegisterAuthenticationAgent", "(sa{sv})ss",
+                               (self.subject(session_id), lang, OBJ_PATH), "")
+                self.authority_owner = self.sync_call(
+                    "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus", "GetNameOwner", "s", (BUS_NAME,), "s")[0]
+                log(f"registered agent for session {session_id}")
+                return
+            except BusError as e:
+                last_err = e
+                log(f"register attempt {attempt + 1} failed: {e}")
+                time.sleep(0.5)
+        raise last_err
+
+    def watch_authority(self) -> None:
+        """Require restart notifications; an unwatched agent cannot reliably recover."""
+        self.sync_call("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                       "org.freedesktop.DBus", "AddMatch", "s",
+                       (BUS_NAME_WATCH_RULE,), "")
+
+    def reset_authentications(self) -> None:
+        # Clear the queue first: finishing the current request must not start it.
+        queued, self.queue = self.queue, deque()
+        for auth in queued:
+            self.reply_return(auth["sender"], auth["reply_serial"])
+        if self.current is not None:
+            self.finish_auth(self.current)
+
+    def reregister(self) -> None:
+        self.reset_authentications()
+        # Let systemd restart on failure instead of leaving an unregistered daemon.
+        self.register()
+
+    def unregister(self) -> None:
+        if self.stopping:
+            # Closing the bus connection removes our registration automatically.
+            return
+        try:
+            sid = self.session_id or os.environ.get("XDG_SESSION_ID", "")
+            if not sid:
+                return
+            sig = "(sa{sv})s"
+            self.send_msg(1, 1, self.call_fields(
+                BUS_NAME, AUTHORITY_PATH, AUTHORITY_IFACE, "UnregisterAuthenticationAgent", sig),
+                sig, (self.subject(sid), OBJ_PATH))
+        except Exception:
+            pass
+
+    # ---------------- auth lifecycle ----------------
+
+    @staticmethod
+    def identity_users(identities: list) -> list[str]:
+        users = []
+        for kind, props in identities:
+            if kind != "unix-user":
+                continue
+            uid = dict(props).get("uid")
+            if uid is None or uid[0] != "u":
+                continue
+            try:
+                name = pwd.getpwuid(uid[1]).pw_name
+            except KeyError:
+                continue
+            if name not in users:
+                if uid[1] == os.geteuid():
+                    users.insert(0, name)
+                else:
+                    users.append(name)
+        return users
+
+    def begin_authentication(self, sender: str, serial: int, vals: tuple) -> None:
+        action_id, message, icon_name, details, cookie, identities = vals
+        if (self.current is not None and self.current["cookie"] == cookie) or any(
+                q["cookie"] == cookie for q in self.queue):
+            self.reply_error(sender, serial, "org.freedesktop.PolicyKit1.Error.Failed",
+                             "Authentication already in progress")
+            return
+        users = self.identity_users(identities)
+        if not users:
+            self.reply_error(sender, serial, "org.freedesktop.PolicyKit1.Error.Failed",
+                             "No supported authentication identity")
+            return
+        auth = {
+            "sender": sender, "reply_serial": serial,
+            "action": action_id, "message": message, "details": dict(details),
+            "cookie": cookie, "users": users, "user": None,
+            "attempts": 0, "prompted": False, "awaiting_response": False,
+            "helper": None, "hbuf": b"", "listener": None, "ui": None,
+            "ui_path": None, "uibuf": b"", "proc": None, "pidfd": -1,
+            "deadline": 0.0,
+        }
+        self.queue.append(auth)
+        self.start_next()
+
+    def runtime_dir(self) -> str:
+        runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        path = os.path.join(runtime, "dusky_polkit")
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        return path
+
+    def open_ui(self, auth: dict) -> None:
+        # One active request per process; no cookie-derived or persistent filenames.
+        path = os.path.join(self.runtime_dir(), f"{os.getpid()}.socket")
+        auth["ui_path"] = path
+        sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        auth["listener"] = sk
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        sk.bind(path)
+        os.chmod(path, 0o600)
+        sk.listen(1)
+        sk.setblocking(False)
+        self.sel.register(sk, selectors.EVENT_READ, ("accept", auth))
+
+    def accept_ui(self, auth: dict) -> None:
+        sk, _ = auth["listener"].accept()
+        sk.setblocking(False)
+        auth["ui"] = sk
+        self.close_socket(auth, "listener")
+        self.sel.register(sk, selectors.EVENT_READ, ("ui", auth))
+        self.send_ui(auth, {"type": "init", "users": auth["users"],
+                            "message": auth["message"], "action": auth["action"],
+                            "details": auth["details"]})
+
+    def send_ui(self, auth: dict, event: dict) -> None:
+        self.sendall_nb(auth["ui"], json.dumps(event).encode() + b"\n")
+
+    def close_socket(self, auth: dict, name: str) -> None:
+        sk = auth[name]
+        if sk is not None:
+            try:
+                self.sel.unregister(sk)
+            except (KeyError, ValueError):
+                pass
+            sk.close()
+            auth[name] = None
+
+    def spawn_terminal(self, auth: dict) -> None:
+        term = os.environ.get("DUSKY_POLKIT_TERMINAL", "foot")
+        cmd = shlex.split(term)
+        if not cmd:
+            raise ValueError("DUSKY_POLKIT_TERMINAL is empty")
+        extra = []
+        base = os.path.basename(cmd[0])
+        if base == "foot":
+            extra = [
+                "--app-id=dusky_polkit",
+                "--title=Dusky Polkit",
+                "--window-size-chars=66x12",
+                "--override=pad=16x16",
+            ]
+        elif base == "kitty":
+            extra = ["--app-id=dusky_polkit", "--title=Dusky Polkit",
+                     "--single-instance=no", "--detach=no"]
+        elif base == "alacritty":
+            extra = ["--class=dusky_polkit", "--title=Dusky Polkit", "-e"]
+        elif base == "ghostty":
+            extra = ["--class=org.dusky.polkit", "--title=Dusky Polkit",
+                     "--gtk-single-instance=false", "-e"]
+
+        env = dict(os.environ)
+        env["DUSKY_UI_SOCKET"] = auth["ui_path"]
+        token = auth["details"].get("xdg-activation-token")
+        if token:
+            env["XDG_ACTIVATION_TOKEN"] = token
+
+        self.kill_terminal(auth)
+
+        try:
+            runner = [sys.executable, os.path.abspath(__file__), "--ui"]
+            exec_args = cmd + extra + runner
+            proc = subprocess.Popen(
+                exec_args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                start_new_session=True,
+            )
+            auth["proc"] = proc
+            # pidfd is part of the supported Linux baseline.
+            auth["pidfd"] = os.pidfd_open(proc.pid)
+            self.sel.register(auth["pidfd"], selectors.EVENT_READ, ("child", auth))
+        except OSError as e:
+            log(f"terminal spawn failed ({cmd[0]}): {e}")
+            raise
+
+    def connect_helper(self, auth: dict) -> bool:
+        sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sk.settimeout(2.0)
+            sk.connect(HELPER_SOCKET)
+            sk.setblocking(False)
+            self.sendall_nb(sk, f"{auth['user']}\n{auth['cookie']}\n".encode())
+        except OSError as e:
+            sk.close()
+            log(f"helper connect failed: {e}")
+            return False
+        auth["helper"] = sk
+        auth["hbuf"] = b""
+        auth["prompted"] = False
+        auth["awaiting_response"] = False
+        self.sel.register(sk, selectors.EVENT_READ, ("helper", auth))
+        return True
+
+    def start_auth(self, auth: dict) -> None:
+        auth["deadline"] = time.monotonic() + AUTH_TIMEOUT
+        try:
+            self.open_ui(auth)
+            self.spawn_terminal(auth)
+        except (OSError, ValueError) as e:
+            log(f"cannot start authentication UI: {e}")
+            self.finish_auth(auth)
+
+    def helper_line(self, auth: dict, line: str) -> None:
+        kind, _, text = line.partition(" ")
+        if kind in ("PAM_PROMPT_ECHO_OFF", "PAM_PROMPT_ECHO_ON"):
+            auth["prompted"] = True
+            auth["awaiting_response"] = True
+            self.send_ui(auth, {"type": "prompt", "text": text,
+                                "echo": kind == "PAM_PROMPT_ECHO_ON"})
+        elif kind in ("PAM_TEXT_INFO", "PAM_ERROR_MSG"):
+            self.send_ui(auth, {"type": "info", "text": text})
+        elif line == "SUCCESS":
+            log(f"authentication succeeded for {auth['user']}")
+            self.finish_auth(auth)
+        elif line == "FAILURE":
+            self.auth_failure(auth)
+        else:
+            raise ValueError(f"unknown helper event {kind!r}")
+
+    def auth_failure(self, auth: dict) -> None:
+        had_prompt = auth["prompted"]
+        self.drop_helper(auth)
+        auth["attempts"] += 1
+        if not had_prompt or auth["attempts"] >= MAX_ATTEMPTS:
+            self.finish_auth(auth)
+            return
+        self.send_ui(auth, {"type": "info", "text":
+                            f"Authentication failed. Attempt {auth['attempts'] + 1}/{MAX_ATTEMPTS}."})
+        if not self.connect_helper(auth):
+            self.finish_auth(auth)
+        # Keep the original deadline: retries must not extend the request forever.
+
+    def pump_ui(self, auth: dict) -> None:
+        chunk = auth["ui"].recv(4096)
+        if not chunk:
+            self.finish_auth(auth, cancelled=True)
+            return
+        auth["uibuf"] += chunk
+        if len(auth["uibuf"]) > HBUF_CAP:
+            raise ValueError("UI response exceeds buffer limit")
+        while b"\n" in auth["uibuf"]:
+            raw, _, auth["uibuf"] = auth["uibuf"].partition(b"\n")
+            event = json.loads(raw)
+            if auth["user"] is None:
+                user = event["user"]
+                if user not in auth["users"]:
+                    raise ValueError("identity was not offered by polkit")
+                auth["user"] = user
+                if not self.connect_helper(auth):
+                    self.finish_auth(auth)
+                    return
+            else:
+                response = event["response"]
+                if not isinstance(response, str) or not auth["awaiting_response"]:
+                    raise ValueError("unexpected PAM response")
+                encoded = response.encode()
+                if len(encoded) > PWBUF_CAP or any(c in encoded for c in (0, 10)):
+                    raise ValueError("PAM response is too long or contains a line terminator")
+                auth["awaiting_response"] = False
+                self.sendall_nb(auth["helper"], encoded + b"\n")
+
+    def drop_helper(self, auth: dict) -> None:
+        self.close_socket(auth, "helper")
+        auth["hbuf"] = b""
+        auth["awaiting_response"] = False
+
+    def kill_terminal(self, auth: dict) -> None:
+        pfd = auth.get("pidfd", -1)
+        if pfd >= 0:
+            try:
+                self.sel.unregister(pfd)
+            except (KeyError, ValueError):
+                pass
+            try:
+                os.close(pfd)
+            except OSError:
+                pass
+            auth["pidfd"] = -1
+
+        proc = auth.get("proc")
+        if proc is not None:
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    proc.kill()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    pass
+            auth["proc"] = None
+
+    def cleanup_auth(self, auth: dict) -> None:
+        self.drop_helper(auth)
+        self.close_socket(auth, "listener")
+        self.close_socket(auth, "ui")
+        self.kill_terminal(auth)
+        if auth["ui_path"]:
+            try:
+                os.unlink(auth["ui_path"])
+            except FileNotFoundError:
+                pass
+            auth["ui_path"] = None
+        auth["uibuf"] = b""
+
+    def finish_auth(self, auth: dict, *, cancelled: bool = False) -> None:
+        self.cleanup_auth(auth)
+        # The helper reports authorization to polkitd. A user dismissal must
+        # be distinct from authentication failure (pkexec exits 126 versus 127).
+        if cancelled:
+            self.reply_error(auth["sender"], auth["reply_serial"],
+                             "org.freedesktop.PolicyKit1.Error.Cancelled",
+                             "Authentication cancelled")
+        else:
+            self.reply_return(auth["sender"], auth["reply_serial"])
+        if self.current is auth:
+            self.current = None
+        trim_memory()
+
+    def cancel_by_cookie(self, cookie: str) -> None:
+        cur = self.current
+        if cur is not None and cur["cookie"] == cookie:
+            log(f"cancelled by authority cookie={cookie}")
+            self.finish_auth(cur, cancelled=True)
+            return
+        for queued in list(self.queue):
+            if queued["cookie"] == cookie:
+                self.queue.remove(queued)
+                self.reply_error(queued["sender"], queued["reply_serial"],
+                                 "org.freedesktop.PolicyKit1.Error.Cancelled",
+                                 "Authentication cancelled")
+                log(f"queued request cancelled cookie={cookie}")
+                return
+
+    def start_next(self) -> None:
+        while self.queue and self.current is None and not self.stopping:
+            nxt = self.queue.popleft()
+            self.current = nxt
+            self.start_auth(nxt)
+
+    # ---------------- replies ----------------
+
+    def reply_return(self, sender: str, reply_serial: int) -> None:
+        self.send_msg(2, 1, [(5, "u", reply_serial), (6, "s", sender)])
+
+    def reply_error(self, sender: str, reply_serial: int, name: str, text: str) -> None:
+        self.send_msg(3, 1,
+                      [(4, "s", name), (5, "u", reply_serial),
+                       (6, "s", sender), (8, "g", "s")],
+                      "s", (text,))
+
+    # ---------------- main loop ----------------
+
+    def dispatch(self, msg: dict) -> None:
+        t, fields = msg["type"], msg["fields"]
+        member, iface = fields.get(3), fields.get(2)
+        sender = fields.get(7, "")
+        if t == 4:
+            if (sender == "org.freedesktop.DBus" and iface == "org.freedesktop.DBus"
+                    and member == "NameOwnerChanged" and msg["sig"] == "sss"
+                    and msg["body"][0] == BUS_NAME):
+                if msg["body"][2] and msg["body"][2] == self.authority_owner:
+                    return
+                self.authority_owner = msg["body"][2]
+                if self.authority_owner:
+                    self.reregister()
+                else:
+                    self.reset_authentications()
+            return
+        if t == 3:
+            err = fields.get(4, "")
+            if err not in BENIGN_ERRORS:
+                log(f"unexpected bus error: {err}")
+            return
+        if t != 1 or fields.get(1) != OBJ_PATH:
+            return
+        serial = msg["serial"]
+        if iface == AGENT_IFACE and member in ("BeginAuthentication", "CancelAuthentication"):
+            if sender != self.authority_owner:
+                self.reply_error(sender, serial, "org.freedesktop.DBus.Error.AccessDenied",
+                                 "Caller is not the polkit authority")
+                return
+            expected = "sssa{ss}sa(sa{sv})" if member == "BeginAuthentication" else "s"
+            if msg["sig"] != expected:
+                self.reply_error(sender, serial, "org.freedesktop.DBus.Error.InvalidArgs",
+                                 "Invalid authentication signature")
+                return
+            if member == "BeginAuthentication":
+                self.begin_authentication(sender, serial, msg["body"])
+            else:
+                self.cancel_by_cookie(msg["body"][0])
+                self.reply_return(sender, serial)
+        elif iface == "org.freedesktop.DBus.Introspectable" and member == "Introspect":
+            self.send_msg(2, 1, [(5, "u", serial), (6, "s", sender),
+                                 (8, "g", "s")], "s", (INTROSPECT_XML,))
+        elif iface == "org.freedesktop.DBus.Peer" and member == "Ping":
+            self.reply_return(sender, serial)
+        elif iface == "org.freedesktop.DBus.Peer" and member == "GetMachineId":
+            with open("/etc/machine-id", encoding="ascii") as f:
+                machine_id = f.read().strip()
+            self.send_msg(2, 1, [(5, "u", serial), (6, "s", sender),
+                                 (8, "g", "s")], "s", (machine_id,))
+        else:
+            self.reply_error(sender, serial, "org.freedesktop.DBus.Error.UnknownMethod",
+                             f"unknown method {member}")
+
+    def pump_bus(self) -> None:
+        assert self.sock is not None
+        try:
+            chunk = self.sock.recv(65536)
+        except (BlockingIOError, InterruptedError):
+            return
+        except ConnectionResetError:
+            raise ConnectionError("bus reset")
+        if not chunk:
+            raise ConnectionError("bus eof")
+        self.rbuf += chunk
+        self.drain_bus()
+
+    def pump_helper(self, auth: dict) -> None:
+        sk = auth["helper"]
+        if sk is None:
+            return
+        try:
+            chunk = sk.recv(4096)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError:
+            self.auth_failure(auth)
+            return
+        if not chunk:
+            self.auth_failure(auth)
+            return
+        auth["hbuf"] += chunk
+        if len(auth["hbuf"]) > HBUF_CAP:
+            log(f"helper buffer overflow cookie={auth['cookie']}")
+            self.finish_auth(auth)
+            return
+        while b"\n" in auth["hbuf"]:
+            raw, _, rest = auth["hbuf"].partition(b"\n")
+            auth["hbuf"] = rest
+            self.helper_line(auth, unescape_helper(raw))
+            if self.current is not auth or auth["helper"] is not sk:
+                break
+
+    def drain_bus(self) -> None:
+        # A synchronous call during dispatch may have consumed older messages.
+        # Let run() process those before touching the newer buffered messages.
+        while self.rbuf and not self.deferred:
+            msg, used = parse_message(self.rbuf)
+            if not used:
+                break
+            self.rbuf = self.rbuf[used:]
+            if msg is not None:
+                self.dispatch(msg)
+
+    def run(self) -> None:
+        while not self.stopping:
+            # Synchronous replies can leave complete messages in the userspace
+            # buffer with no further socket readiness notification.
+            while self.deferred:
+                stash, self.deferred = self.deferred, []
+                for msg in stash:
+                    self.dispatch(msg)
+            self.drain_bus()
+            if self.deferred:
+                continue
+            self.start_next()
+            timeout = None
+            if self.current is not None:
+                timeout = max(0.0, self.current["deadline"] - time.monotonic())
+            for key, _mask in self.sel.select(timeout):
+                if key.data == "bus":
+                    self.pump_bus()
+                    continue
+                if key.data == "signal":
+                    self.wakeup_read.recv(4096)
+                    continue
+                kind, auth = key.data
+                # A previous event can finish/retry a request and reuse an fd.
+                if self.current is not auth:
+                    continue
+                expected = {"accept": auth["listener"], "ui": auth["ui"],
+                            "helper": auth["helper"], "child": auth["pidfd"]}[kind]
+                if key.fileobj != expected:
+                    continue
+                try:
+                    if kind == "accept":
+                        self.accept_ui(auth)
+                    elif kind == "ui":
+                        self.pump_ui(auth)
+                    elif kind == "helper":
+                        self.pump_helper(auth)
+                    elif kind == "child":
+                        self.finish_auth(auth, cancelled=True)
+                except BlockingIOError:
+                    continue
+                except (OSError, ValueError, KeyError, TypeError) as e:
+                    log(f"authentication event failed ({kind}): {e}")
+                    self.finish_auth(auth)
+            cur = self.current
+            if cur is not None and time.monotonic() >= cur["deadline"]:
+                log("authentication timed out")
+                self.finish_auth(cur, cancelled=True)
+
+    def shutdown_cleanup(self) -> None:
+        self.queue.clear()
+        if self.current is not None:
+            self.cleanup_auth(self.current)
+            self.current = None
+        self.unregister()
+        if self.sock is not None:
+            self.sock.close()
+        self.wakeup_read.close()
+        self.wakeup_write.close()
+        self.sel.close()
+
+
+def _is_standalone_escape(fd: int) -> bool:
+    """Return True if no escape-sequence bytes follow \\x1b within 25ms."""
+    if not select.select([fd], [], [], 0.025)[0]:
+        return True
+    while select.select([fd], [], [], 0.005)[0]:
+        if not os.read(fd, 64):
+            break
+    return False
+
+
+def _read_prompt(fd: int, prompt: str, echo: bool) -> str:
+    """Read a line in cbreak mode; cancel on standalone Escape, Ctrl+C, or Ctrl+D."""
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    buf = bytearray()
+    while True:
+        ch = os.read(fd, 1)
+        if not ch or ch == b"\x04":
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            raise EOFError
+        if ch == b"\x03":
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            raise KeyboardInterrupt
+        if ch == b"\x1b":
+            if _is_standalone_escape(fd):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                raise KeyboardInterrupt
+            continue
+        if ch in (b"\r", b"\n"):
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return buf.decode("utf-8", "replace")
+        if ch in (b"\x7f", b"\x08"):
+            if buf:
+                while buf and (buf[-1] & 0xC0) == 0x80:
+                    buf.pop()
+                if buf:
+                    buf.pop()
+                if echo:
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+            continue
+        if ch == b"\x15":
+            if echo and buf:
+                n = len(buf.decode("utf-8", "replace"))
+                sys.stdout.write("\b \b" * n)
+                sys.stdout.flush()
+            buf.clear()
+            continue
+        b0 = ch[0]
+        if b0 >= 32 or ch == b"\t":
+            need = (1 if 0xC0 <= b0 < 0xE0 else
+                    2 if 0xE0 <= b0 < 0xF0 else
+                    3 if 0xF0 <= b0 < 0xF8 else 0)
+            while need > 0 and select.select([fd], [], [], 0.01)[0]:
+                more = os.read(fd, need)
+                if not more:
+                    break
+                ch += more
+                need -= len(more)
+            buf.extend(ch)
+            if echo:
+                sys.stdout.write(ch.decode("utf-8", "replace"))
+                sys.stdout.flush()
+
+
+def _recv_ui_event(sk: socket.socket, fd: int, rbuf: bytes) -> tuple[dict | None, bytes]:
+    """Wait for the next JSON line from the daemon while allowing Escape to cancel."""
+    while b"\n" not in rbuf:
+        readable, _, _ = select.select([sk, fd], [], [])
+        if fd in readable:
+            ch = os.read(fd, 1)
+            if not ch or ch in (b"\x03", b"\x04"):
+                raise KeyboardInterrupt
+            if ch == b"\x1b" and _is_standalone_escape(fd):
+                raise KeyboardInterrupt
+        if sk in readable:
+            chunk = sk.recv(4096)
+            if not chunk:
+                return None, rbuf
+            rbuf += chunk
+    raw, _, rbuf = rbuf.partition(b"\n")
+    return json.loads(raw), rbuf
+
+
+def run_ui() -> int:
+    """One transient terminal handles the entire PAM conversation."""
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.text import Text
+        console = Console(highlight=False)
+    except ImportError:
+        console = None
+    if not sys.stdin.isatty():
+        return 1
+    fd = sys.stdin.fileno()
+    old_term = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd, termios.TCSADRAIN)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sk:
+            sk.connect(os.environ["DUSKY_UI_SOCKET"])
+            rbuf = b""
+            while True:
+                event, rbuf = _recv_ui_event(sk, fd, rbuf)
+                if event is None:
+                    break
+                kind = event["type"]
+                if kind == "init":
+                    # Preserve the supplied action message, including pkexec's
+                    # program/user context, and treat it as literal text.
+                    message = event["message"] or "Authentication required"
+                    body = f"{message}\n\nAction: {event['action']}"
+                    program = event["details"].get("program")
+                    if program:
+                        body += f"\nProgram: {program}"
+                    if console:
+                        console.print(Panel(Text(body), title="Dusky Polkit",
+                                            border_style="#89b4fa"))
+                    else:
+                        print(body)
+                    users = event["users"]
+                    index = 0
+                    if len(users) > 1:
+                        for i, user in enumerate(users, 1):
+                            print(f"  {i}. {user}")
+                        while True:
+                            answer = _read_prompt(fd, "Authenticate as [1]: ", True).strip() or "1"
+                            if answer.isdecimal() and 1 <= int(answer) <= len(users):
+                                index = int(answer) - 1
+                                break
+                    print(f"User: {users[index]}", flush=True)
+                    reply = {"user": users[index]}
+                elif kind == "prompt":
+                    prompt = event["text"]
+                    response = _read_prompt(fd, prompt, bool(event["echo"]))
+                    reply = {"response": response}
+                elif kind == "info":
+                    print(event["text"], flush=True)
+                    continue
+                else:
+                    return 1
+                sk.sendall(json.dumps(reply).encode() + b"\n")
+        return 0
+    except (KeyboardInterrupt, EOFError, OSError, ValueError, KeyError):
+        return 1
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+
+
+def main() -> int:
+    agent = Agent()
+    old_wakeup = signal.set_wakeup_fd(agent.wakeup_write.fileno())
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, lambda *_: setattr(agent, "stopping", True))
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    try:
+        agent.connect_bus()
+        agent.watch_authority()
+        agent.register()
+        trim_memory()
+        agent.run()
+        return 0
+    except (BusError, OSError) as e:
+        if agent.stopping:
+            return 0
+        log(f"fatal: {e}; exiting (systemd will restart)")
+        return 1
+    except Exception as e:
+        traceback.print_exc()
+        log(f"unexpected failure: {e}")
+        return 1
+    finally:
+        signal.set_wakeup_fd(old_wakeup)
+        agent.shutdown_cleanup()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--ui":
+        sys.exit(run_ui())
+    sys.exit(main())
